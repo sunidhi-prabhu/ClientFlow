@@ -24,8 +24,15 @@ type ModelPolicy = {
  */
 export const modelPolicies = {
   Organization: { scope: "organization", scalarFields: Prisma.OrganizationScalarFieldEnum },
+  Membership: { scope: "tenant", scalarFields: Prisma.MembershipScalarFieldEnum },
   Client: { scope: "tenant", scalarFields: Prisma.ClientScalarFieldEnum },
+  ClientActivity: { scope: "tenant", scalarFields: Prisma.ClientActivityScalarFieldEnum },
   Project: { scope: "tenant", scalarFields: Prisma.ProjectScalarFieldEnum },
+  // Authentication (Better Auth): accessed only through src/server/auth.
+  User: { scope: "global", scalarFields: Prisma.UserScalarFieldEnum },
+  Session: { scope: "global", scalarFields: Prisma.SessionScalarFieldEnum },
+  Account: { scope: "global", scalarFields: Prisma.AccountScalarFieldEnum },
+  Verification: { scope: "global", scalarFields: Prisma.VerificationScalarFieldEnum },
 } satisfies Record<Prisma.ModelName, ModelPolicy>;
 
 export type ModelName = keyof typeof modelPolicies;

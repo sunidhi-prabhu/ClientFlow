@@ -6,6 +6,7 @@ import {
   AppError,
   ConflictError,
   NotFoundError,
+  OwnerRequiredError,
   ReferenceNotFoundError,
   ValidationError,
   type ActionResult,
@@ -45,6 +46,29 @@ function foreignKeyError(error: Prisma.PrismaClientKnownRequestError): AppError 
   return new ReferenceNotFoundError();
 }
 
+type DatabaseErrorCause = { originalCode?: unknown; originalMessage?: unknown };
+
+/**
+ * Whether `error` is the "at least one OWNER" trigger (migration
+ * auth_and_memberships) firing. It arrives either as a Prisma P2039 for a
+ * single statement, or as a bare DriverAdapterError when an interactive
+ * transaction fails at COMMIT (the trigger is deferred).
+ */
+function isOwnerInvariantViolation(error: unknown): boolean {
+  let cause: DatabaseErrorCause | undefined;
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    cause = (error.meta as { driverAdapterError?: { cause?: DatabaseErrorCause } } | undefined)
+      ?.driverAdapterError?.cause;
+  } else if (error instanceof Error && error.name === "DriverAdapterError") {
+    cause = error.cause as DatabaseErrorCause | undefined;
+  }
+  return (
+    cause?.originalCode === "23514" &&
+    typeof cause.originalMessage === "string" &&
+    cause.originalMessage.includes("must have at least one owner")
+  );
+}
+
 /**
  * Normalize any thrown value into an `AppError`. Unknown errors are logged
  * with full detail and replaced by a generic error so internals never leak.
@@ -61,6 +85,9 @@ export function toAppError(error: unknown, context?: Record<string, unknown>): A
       cause: error,
     });
   }
+
+  // Backstop for the ownership check (e.g. two concurrent demotions).
+  if (isOwnerInvariantViolation(error)) return new OwnerRequiredError();
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     // Constraint names and values in `error.meta` stay server-side.

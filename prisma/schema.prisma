@@ -11,8 +11,12 @@
 //   PostgreSQL then rejects any link between rows of different organizations.
 // - Every new model must be classified in src/server/tenancy/models.ts.
 //
-// The models below are intentionally minimal: they establish the tenancy
+// Client and Project are intentionally minimal: they establish the tenancy
 // structure only. Feature milestones add their remaining fields.
+//
+// User, Session, Account and Verification are GLOBAL authentication models
+// owned by Better Auth (field names must match its schema). They are never
+// reachable through the tenant-scoped client.
 
 generator client {
   provider     = "prisma-client"
@@ -32,22 +36,99 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  clients  Client[]
-  projects Project[]
+  memberships      Membership[]
+  clients          Client[]
+  clientActivities ClientActivity[]
+  projects         Project[]
 }
 
-/// Tenant-owned parent resource.
-model Client {
-  id             String   @id @default(cuid())
+enum MembershipRole {
+  OWNER
+  ADMIN
+  MANAGER
+  MEMBER
+}
+
+/// Tenant-owned: a user's role in one organization. A user may belong to many
+/// organizations. The database guarantees every organization keeps at least
+/// one OWNER (see the init_auth migration trigger).
+model Membership {
+  id             String         @id @default(cuid())
   organizationId String
-  name           String
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  userId         String
+  role           MembershipRole
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  projects     Project[]
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([organizationId, id])
+  @@unique([organizationId, userId])
+  // Deliberate exception to "indexes lead with organizationId": resolving the
+  // organizations a signed-in user belongs to is a per-user lookup.
+  @@index([userId])
+}
+
+enum ClientStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+/// Tenant-owned: a customer of the organization.
+model Client {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  company        String?
+  email          String?
+  phone          String?
+  /// Free-form postal address (multi-line).
+  address        String?
+  notes          String?
+  /// ARCHIVED is set only by the archive operation (archivedAt records when).
+  status         ClientStatus @default(ACTIVE)
+  archivedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projects     Project[]
+  activities   ClientActivity[]
+
+  @@unique([organizationId, id])
+  // Default list: an organization's clients by status, ordered by name / recency.
+  @@index([organizationId, status, name])
+  @@index([organizationId, updatedAt])
+}
+
+enum ClientActivityType {
+  CREATED
+  UPDATED
+  ARCHIVED
+  RESTORED
+}
+
+/// Tenant-owned, append-only history of changes to one client. Written in the
+/// same transaction as the change it records.
+model ClientActivity {
+  id             String             @id @default(cuid())
+  organizationId String
+  clientId       String
+  /// Who made the change; null if that user was later deleted.
+  actorUserId    String?
+  type           ClientActivityType
+  /// For UPDATED: { field: { from, to } } for each changed field.
+  changes        Json?
+  createdAt      DateTime           @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client       Client       @relation(fields: [organizationId, clientId], references: [organizationId, id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, id])
+  @@index([organizationId, clientId, createdAt])
 }
 
 /// Tenant-owned child of Client.
@@ -65,4 +146,74 @@ model Project {
 
   @@unique([organizationId, id])
   @@index([organizationId, clientId])
+}
+
+// ---------------------------------------------------------------------------
+// Global authentication models (Better Auth)
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions         Session[]
+  accounts         Account[]
+  memberships      Membership[]
+  clientActivities ClientActivity[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  /// Opaque session token (the cookie holds a signed copy).
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Credentials (providerId "credential", scrypt password hash) and OAuth
+/// accounts (e.g. providerId "google").
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Server-side single-use tokens: email verification codes and password reset
+/// tokens. Identifiers and codes are stored hashed.
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
 }

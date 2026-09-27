@@ -6,11 +6,21 @@ import { usePathname } from "next/navigation";
 import { mainNavigation } from "@/config/navigation";
 import { cn } from "@/lib/utils";
 
-function isActive(pathname: string, href: string) {
-  return href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(`${href}/`);
+function isActive(pathname: string, basePath: string, href: string) {
+  const target = `${basePath}${href}`;
+  return href === ""
+    ? pathname === basePath
+    : pathname === target || pathname.startsWith(`${target}/`);
 }
 
-export function NavLinks({ orientation }: { orientation: "vertical" | "horizontal" }) {
+export function NavLinks({
+  orientation,
+  basePath,
+}: {
+  orientation: "vertical" | "horizontal";
+  /** The organization's root, e.g. `/o/acme`. */
+  basePath: string;
+}) {
   const pathname = usePathname();
 
   return (
@@ -21,11 +31,11 @@ export function NavLinks({ orientation }: { orientation: "vertical" | "horizonta
       )}
     >
       {mainNavigation.map(({ title, href, icon: Icon }) => {
-        const active = isActive(pathname, href);
+        const active = isActive(pathname, basePath, href);
         return (
-          <li key={href}>
+          <li key={title}>
             <Link
-              href={href}
+              href={`${basePath}${href}`}
               aria-current={active ? "page" : undefined}
               className={cn(
                 "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",

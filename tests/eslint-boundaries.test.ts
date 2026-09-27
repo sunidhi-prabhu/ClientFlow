@@ -20,6 +20,10 @@ describe("database import boundaries", () => {
     "src/app/actions.ts",
     "src/components/example.tsx",
     "src/server/clients/service.ts",
+    // Only the bootstrap file is allowlisted, not the whole organizations module.
+    "src/server/organizations/settings.ts",
+    "src/server/protected.ts",
+    "src/lib/permissions.ts",
   ])("forbids the unscoped client in %s", async (filePath) => {
     expect(await restrictedImportErrors(RAW_DB_IMPORT, filePath)).toHaveLength(1);
   });
@@ -29,12 +33,15 @@ describe("database import boundaries", () => {
     expect(await restrictedImportErrors(code, "src/app/api/example/route.ts")).toHaveLength(1);
   });
 
-  it.each(["src/server/tenancy/tenant-db.ts", "src/server/health.ts"])(
-    "allows the unscoped client in infrastructure module %s",
-    async (filePath) => {
-      expect(await restrictedImportErrors(RAW_DB_IMPORT, filePath)).toHaveLength(0);
-    },
-  );
+  it.each([
+    "src/server/tenancy/tenant-db.ts",
+    "src/server/tenancy/context.ts",
+    "src/server/health.ts",
+    "src/server/auth/auth.ts",
+    "src/server/organizations/bootstrap.ts",
+  ])("allows the unscoped client in infrastructure module %s", async (filePath) => {
+    expect(await restrictedImportErrors(RAW_DB_IMPORT, filePath)).toHaveLength(0);
+  });
 
   it("forbids constructing a second Prisma client anywhere outside lib/db", async () => {
     const code = `import { PrismaClient } from "@/generated/prisma/client";\nexport const c = PrismaClient;\n`;

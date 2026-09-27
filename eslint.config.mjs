@@ -6,10 +6,19 @@ import prettier from "eslint-config-prettier/flat";
 /**
  * Server-only infrastructure allowed to use the unscoped client from
  * `@/lib/db`. Everything else must use `getTenantDb()` from
- * `@/server/tenancy`. Add auth/bootstrap modules here when they exist, and
- * only if they genuinely need cross-organization access.
+ * `@/server/tenancy`. Add a module only if it genuinely needs
+ * cross-organization or global (authentication) access.
  */
-const RAW_DB_ALLOWED = ["src/server/tenancy/**/*.ts", "src/server/health.ts"];
+const RAW_DB_ALLOWED = [
+  // Tenant client, tenant-context resolution, the user's organization list.
+  "src/server/tenancy/**/*.ts",
+  // Health check (SELECT 1).
+  "src/server/health.ts",
+  // Better Auth adapter: global User/Session/Account/Verification tables.
+  "src/server/auth/**/*.ts",
+  // Creates an organization and its first OWNER before any tenant exists.
+  "src/server/organizations/bootstrap.ts",
+];
 
 function databaseImportRules({ allowRawDb }) {
   return {

@@ -11,14 +11,20 @@ describe("NavLinks", () => {
   afterEach(cleanup);
 
   it("marks the current route as active", () => {
-    pathname.current = "/";
-    render(<NavLinks orientation="vertical" />);
+    pathname.current = "/o/acme";
+    render(<NavLinks orientation="vertical" basePath="/o/acme" />);
     expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
   });
 
   it("does not mark the root link active on other routes", () => {
-    pathname.current = "/clients";
-    render(<NavLinks orientation="vertical" />);
+    pathname.current = "/o/acme/clients";
+    render(<NavLinks orientation="vertical" basePath="/o/acme" />);
     expect(screen.getByRole("link", { name: "Overview" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("links within the current organization", () => {
+    pathname.current = "/o/acme";
+    render(<NavLinks orientation="vertical" basePath="/o/acme" />);
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("href", "/o/acme");
   });
 });

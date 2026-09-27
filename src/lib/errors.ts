@@ -99,6 +99,19 @@ export class ConflictError extends AppError {
   }
 }
 
+/**
+ * The change would leave an organization without an OWNER. Raised by the
+ * application check (src/server/organizations/ownership.ts) and, as a
+ * backstop, mapped from the database trigger by `toAppError`.
+ */
+export class OwnerRequiredError extends ConflictError {
+  constructor() {
+    super(
+      "An organization must always have at least one owner. Make another member an owner first.",
+    );
+  }
+}
+
 export class RateLimitedError extends AppError {
   constructor(message = "Too many requests") {
     super("RATE_LIMITED", message, 429);

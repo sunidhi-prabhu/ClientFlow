@@ -1,23 +1,24 @@
 import { CheckCircle2, CircleAlert } from "lucide-react";
-import { connection } from "next/server";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getHealthReport } from "@/server/health";
+import { getTenantContextForPage } from "@/server/tenancy/context";
 
-export default async function OverviewPage() {
-  // Render per request: the status below must reflect the live database.
-  await connection();
+export default async function OverviewPage({ params }: PageProps<"/o/[orgSlug]">) {
+  const { orgSlug } = await params;
+  const ctx = await getTenantContextForPage(orgSlug);
   const { checks } = await getHealthReport();
   const databaseOk = checks.database.status === "ok";
 
   return (
     <div className="space-y-8">
       <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-        <p className="text-muted-foreground">
-          ClientFlow is set up. Features will appear here as they ship.
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">{ctx.organization.name}</h1>
+          <Badge variant="secondary">{ctx.role}</Badge>
+        </div>
+        <p className="text-muted-foreground">Features will appear here as they ship.</p>
       </div>
 
       <Card className="max-w-md">

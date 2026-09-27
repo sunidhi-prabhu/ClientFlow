@@ -4,15 +4,15 @@ CRM and project management for freelancers and small agencies: clients,
 projects, Kanban tasks, invoices and reporting, organized into multi-user
 organizations with role-based access.
 
-> **Status:** project foundation. The application shell, database connection,
-> health check, error handling, tenant-isolation layer and test setup
-> (unit + PostgreSQL integration + CI) are in place. Authentication and
-> business features are not implemented yet (see [Roadmap](#roadmap)).
+> **Status:** foundation, tenant isolation, authentication (email/password,
+> email verification, password reset, Google), organizations with roles, RBAC,
+> and client management are in place. Projects, tasks, invoices and reports
+> are not implemented yet (see [Roadmap](#roadmap)).
 
 ## Tech stack
 
 Next.js 16 (App Router) · React 19 · TypeScript · PostgreSQL 17 · Prisma 7 ·
-Tailwind CSS 4 · shadcn/ui · Zod · Vitest · ESLint · Prettier
+Tailwind CSS 4 · shadcn/ui · Better Auth · Zod · Vitest · ESLint · Prettier
 
 See [docs/architecture.md](docs/architecture.md) for design decisions.
 
@@ -26,9 +26,19 @@ See [docs/architecture.md](docs/architecture.md) for design decisions.
 ```bash
 npm install                 # also generates the Prisma client
 cp .env.example .env        # defaults match docker-compose.yml
-npm run db:up               # start PostgreSQL in Docker and wait until healthy
+# set BETTER_AUTH_SECRET in .env:  openssl rand -base64 32
+npm run db:up               # PostgreSQL + Mailpit (local email inbox) in Docker
+npm run db:deploy           # apply migrations
 npm run dev                 # http://localhost:3000
 ```
+
+Create an account at http://localhost:3000/sign-up. The verification code
+(and any password reset link) arrives in Mailpit at http://localhost:8025.
+After verifying, create your first organization.
+
+To enable **Continue with Google**, create an OAuth client in Google Cloud,
+add `http://localhost:3000/api/auth/callback/google` as an authorized redirect
+URI, and set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
 
 Check that everything is connected:
 
@@ -37,7 +47,7 @@ curl http://localhost:3000/api/health
 # {"status":"ok",...,"checks":{"database":{"status":"ok","latencyMs":2}}}
 ```
 
-The overview page at `/` shows the same database status.
+Each organization's overview page (`/o/<slug>`) shows the same database status.
 
 **Using your own PostgreSQL instead of Docker:** set `DATABASE_URL` in `.env`
 and skip `npm run db:up`.
@@ -69,11 +79,16 @@ and skip `npm run db:up`.
 Declared in [.env.example](.env.example) and validated at runtime by
 [src/lib/env.ts](src/lib/env.ts).
 
-| Variable            | Required              | Description                                                                       |
-| ------------------- | --------------------- | --------------------------------------------------------------------------------- |
-| `DATABASE_URL`      | yes                   | PostgreSQL connection string                                                      |
-| `LOG_LEVEL`         | no                    | `debug` \| `info` (default) \| `warn` \| `error`                                  |
-| `TEST_DATABASE_URL` | for integration tests | Test database; name must end in `_test` (created if missing, wiped between tests) |
+| Variable                                    | Required              | Description                                                                            |
+| ------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                              | yes                   | PostgreSQL connection string                                                           |
+| `LOG_LEVEL`                                 | no                    | `debug` \| `info` (default) \| `warn` \| `error`                                       |
+| `BETTER_AUTH_SECRET`                        | yes                   | Signs cookies and tokens; at least 32 characters                                       |
+| `BETTER_AUTH_URL`                           | yes                   | Public base URL (HTTPS in production)                                                  |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | no                    | Enable Google sign-in (both or neither)                                                |
+| `SMTP_URL`                                  | yes                   | SMTP server for verification codes and reset links (`smtp://localhost:1025` = Mailpit) |
+| `EMAIL_FROM`                                | yes                   | Sender address                                                                         |
+| `TEST_DATABASE_URL`                         | for integration tests | Test database; name must end in `_test` (created if missing, wiped between tests)      |
 
 ## Project structure
 
@@ -119,11 +134,9 @@ new-model checklist in [CLAUDE.md](CLAUDE.md).
 
 ## Roadmap
 
-1. Authentication, users, memberships and organization switching
-2. Tenant context resolution (session + membership → `getTenantDb`)
-3. RBAC enforcement and role-based tests
-4. Client management
-5. Projects and Kanban tasks
-6. Invoices
-7. Audit logs
-8. Reporting
+1. Member management (invitations, role changes, removal)
+2. ~~Client management~~ (done)
+3. Projects and Kanban tasks
+4. Invoices
+5. Audit logs
+6. Reporting

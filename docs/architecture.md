@@ -4,8 +4,9 @@ ClientFlow is a multi-tenant CRM and project-management SaaS for freelancers and
 small agencies. This document records the architecture and the decisions behind
 it. Update it when a decision changes.
 
-**Status:** foundation plus tenant-isolation layer. Authentication, RBAC and
-all business features described below as _planned_ do not exist in code yet.
+**Status:** foundation, tenant isolation, authentication, organizations and
+RBAC infrastructure. Business features (clients, projects, tasks, invoices,
+reports) are not implemented yet.
 
 ---
 
@@ -33,33 +34,40 @@ Postgres-backed job queue) before introducing new infrastructure.
 
 ## 2. Technology choices
 
-| Concern       | Choice                                | Why                                                                                        |
-| ------------- | ------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Framework     | Next.js 16 (App Router) + React 19    | Full-stack in one deployable; Server Components keep data access server-side               |
-| Language      | TypeScript (strict)                   | Type safety across UI, services and database                                               |
-| Database      | PostgreSQL 17                         | Relational integrity for tenants, invoices, audit history                                  |
-| ORM           | Prisma 7 with `@prisma/adapter-pg`    | Mature migrations, generated types; the driver adapter is Prisma 7's standard runtime path |
-| Validation    | Zod 4                                 | One schema for env, request bodies, form input                                             |
-| Styling       | Tailwind CSS 4                        | Design tokens as CSS variables, fast iteration                                             |
-| Components    | shadcn/ui (Base UI primitives)        | Accessible primitives whose source lives in the repo and can be edited                     |
-| Icons         | lucide-react                          | Consistent, tree-shakeable                                                                 |
-| Unit tests    | Vitest + Testing Library              | Fast, ESM-native, works with the same TS config                                            |
-| Lint / format | ESLint (next config) + Prettier       | Standard Next.js rules; formatting never argued in review                                  |
-| Local DB      | Docker Compose (`postgres:17-alpine`) | Reproducible dev database; creates a separate test database                                |
+| Concern        | Choice                                | Why                                                                                        |
+| -------------- | ------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Framework      | Next.js 16 (App Router) + React 19    | Full-stack in one deployable; Server Components keep data access server-side               |
+| Language       | TypeScript (strict)                   | Type safety across UI, services and database                                               |
+| Database       | PostgreSQL 17                         | Relational integrity for tenants, invoices, audit history                                  |
+| ORM            | Prisma 7 with `@prisma/adapter-pg`    | Mature migrations, generated types; the driver adapter is Prisma 7's standard runtime path |
+| Validation     | Zod 4                                 | One schema for env, request bodies, form input                                             |
+| Styling        | Tailwind CSS 4                        | Design tokens as CSS variables, fast iteration                                             |
+| Components     | shadcn/ui (Base UI primitives)        | Accessible primitives whose source lives in the repo and can be edited                     |
+| Icons          | lucide-react                          | Consistent, tree-shakeable                                                                 |
+| Unit tests     | Vitest + Testing Library              | Fast, ESM-native, works with the same TS config                                            |
+| Lint / format  | ESLint (next config) + Prettier       | Standard Next.js rules; formatting never argued in review                                  |
+| Authentication | Better Auth 1.7 (+ emailOTP plugin)   | Maintained auth: scrypt hashing, DB sessions, verification, reset, Google                  |
+| Email          | nodemailer (SMTP); Mailpit locally    | Provider-neutral; local inbox for development                                              |
+| Local DB       | Docker Compose (`postgres:17-alpine`) | Reproducible dev database; creates a separate test database                                |
 
 ## 3. Code organization
 
 ```
 src/
   app/                    Next.js routes only. Thin: parse input, call a service, render.
-    (app)/                Authenticated application area (shares AppShell layout)
+    (auth)/               sign-in, sign-up, verify-email, forgot/reset password + auth actions
+    (onboarding)/         create an organization
+    o/[orgSlug]/          the application for one organization (AppShell)
     api/                  Route handlers: health, webhooks, external/public API
     error.tsx, global-error.tsx, not-found.tsx
   components/
     ui/                   shadcn/ui primitives (generated, then owned by us)
     layout/               Application frame: shell, navigation, logo
   config/                 Static app configuration (navigation, etc.)
+  proxy.ts                CSP nonce + optimistic sign-in redirect (not a security boundary)
   lib/                    Framework-agnostic infrastructure
+    permissions.ts        RBAC policy (pure; server-enforced, UI may read)
+    security/headers.ts   security headers and CSP
     db.ts                 Prisma client singleton (server-only)
     env.ts                Validated environment (server-only)
     errors.ts             AppError hierarchy + response/result types
@@ -67,7 +75,11 @@ src/
     logger.ts             Structured logger
   server/                 Server-only domain code, one folder per domain:
     health.ts             dependency health checks
-    tenancy/              tenant-scoped Prisma client, model classification, scoping rules
+    protected.ts          the request pipeline (tenantAction, tenantRoute, authenticatedAction)
+    auth/                 Better Auth config, session helpers, auth error mapping
+    email/                SMTP mailer, templates, deferred dispatch
+    organizations/        organization bootstrap (org + OWNER membership)
+    tenancy/              tenant client, tenant context, membership listing, scoping rules
     <domain>/             e.g. clients/, projects/: service.ts, schemas.ts, *.test.ts
   generated/prisma/       Generated Prisma client (git-ignored; `npm run db:generate`)
 prisma/
@@ -131,8 +143,8 @@ classification against the `organizationId` column.
 
 ### Layer 2: import boundary (ESLint)
 
-Only modules in `RAW_DB_ALLOWED` (`eslint.config.mjs`: tenancy, health) may
-import the unscoped `@/lib/db`. Everything else, including pages, route
+Only modules in `RAW_DB_ALLOWED` (`eslint.config.mjs`: tenancy, health, auth,
+and the organization bootstrap file) may import the unscoped `@/lib/db`. Everything else, including pages, route
 handlers, Server Actions and domain services, must use `getTenantDb`.
 Constructing a `PrismaClient` or importing `@prisma/client` is forbidden
 everywhere except `src/lib/db.ts`. `tests/eslint-boundaries.test.ts` proves the
@@ -157,49 +169,270 @@ rules fire.
   be deleted, but deleting an organization cascades through all its rows) and
   never `SET NULL` (which would null `organizationId`).
 
-### Rules for the request layer (with authentication)
+### Layer 4: tenant context and the request pipeline
 
-1. Every request resolves a **tenant context** on the server:
-   `{ userId, organizationId, role }` from the session plus a membership
-   lookup. The organization id is **never trusted from client input alone**; a
-   URL slug is only a _selector_ that must match a membership.
-2. Only that resolved `organizationId` is passed to `getTenantDb`.
-3. Cross-tenant access yields 404, never 403, so other tenants' data cannot be
-   probed. (403 is reserved for explicit attempts the tenant client rejects.)
+`getTenantContext(orgSlug)` (`src/server/tenancy/context.ts`, cached per
+request with React `cache()`):
 
-**Not used (yet):** PostgreSQL row-level security. It would need every query
-wrapped in a transaction that sets the current org, plus a non-owner database
-role. The three layers above provide the isolation guarantees without that
-cost. The composite-key schema is compatible with adding RLS later.
+1. validates the session in the database (`requireSession`; 401 if missing,
+   expired or revoked);
+2. looks up the signed-in user's **membership** in the organization whose slug
+   is in the URL. The slug is only a _selector_; unknown organizations and
+   organizations the user does not belong to both return the same 404;
+3. returns `{ userId, organization, membership, role }`. Every value comes from
+   the session and the database. Nothing is read from request data.
 
-## 5. Authorization / RBAC (planned design)
+`src/server/protected.ts` runs the one pipeline for every protected entry point:
 
-Roles, highest to lowest: `OWNER` > `ADMIN` > `MANAGER` > `MEMBER`.
+```
+authenticated session → tenant context → permission check → input validation
+→ business operation (with getTenantDb(ctx.organization.id)) → error handling
+```
 
-| Role    | Intended scope                                                             |
-| ------- | -------------------------------------------------------------------------- |
-| OWNER   | Everything, including billing, deleting the org, transferring ownership    |
-| ADMIN   | Manage members and settings, all CRM/project/invoice data                  |
-| MANAGER | Manage clients, projects, tasks and invoices; no member/org administration |
-| MEMBER  | Work on assigned projects and tasks; read access as configured             |
+- `tenantAction({ permission, input }, handler)`: Server Actions, returns `ActionResult`.
+- `tenantRoute({ permission, input }, handler)`: Route Handlers under `/api/o/[orgSlug]/…`.
+- `authenticatedAction({ input }, handler)`: signed in, no organization yet (onboarding).
 
-The exact permission matrix is finalized in the RBAC milestone. Implementation
-principles:
+Input is read only after authorization succeeds, and Zod schemas strip unknown
+keys, so `{ role: "OWNER", organizationId, userId }` in a request has no
+effect. Pages use `getTenantContextForPage` (redirect to sign-in / 404).
 
-- Permissions are checked in the **service layer**, not only in the UI. The UI
-  hides actions the user cannot perform, but the server is the authority.
-- Checks are expressed as named permissions (e.g. `invoice:send`) mapped to
-  roles in one module, never as scattered `role === "ADMIN"` comparisons.
-- An organization always has at least one OWNER.
+Global authentication models (`User`, `Session`, `Account`, `Verification`) are
+classified `global` and are unreachable through `getTenantDb`. `Membership` is
+tenant-owned and follows every rule above. It has one deliberate index that
+does not lead with `organizationId`: `(userId)`, for "which organizations does
+this user belong to".
 
-## 6. Authentication (planned)
+## 5. Authorization / RBAC
 
-Not implemented. The library is chosen in the auth milestone. Requirements:
-database-backed sessions stored in PostgreSQL via Prisma, secure HTTP-only
-cookies, email/password plus optional OAuth, and support for multiple
-organization memberships per user. Route protection will happen in server
-code (layouts/services) and, where useful, in Next.js `proxy.ts` for redirects.
-The proxy is not the security boundary.
+Defined in one pure module, `src/lib/permissions.ts`. The server enforces it
+through the pipeline (`assertPermission`); UI code may call `hasPermission` to
+hide actions, but that is never the security control. Code checks named
+permissions, never `role === "ADMIN"`.
+
+| Area         | Permissions                                              | OWNER | ADMIN        | MANAGER           | MEMBER               |
+| ------------ | -------------------------------------------------------- | ----- | ------------ | ----------------- | -------------------- |
+| Organization | `organization:read` / `update` / `delete`                | all   | read, update | read              | read                 |
+| Members      | `member:read` / `invite` / `update-role` / `remove`      | all   | all          | read              | read                 |
+| Clients      | `client:read` / `create` / `update` / `delete`           | all   | all          | all               | read                 |
+| Projects     | `project:*`                                              | all   | all          | all               | read                 |
+| Tasks        | `task:*`                                                 | all   | all          | all               | read, create, update |
+| Invoices     | `invoice:read` / `create` / `update` / `delete` / `send` | all   | all          | all except delete | none                 |
+| Reports      | `report:read`                                            | yes   | yes          | yes               | no                   |
+
+Roles are strictly nested (each has everything the role below has).
+
+**Role changes** (`canChangeRole` / `assertCanChangeRole`) prevent escalation:
+requires `member:update-role`; nobody changes their own role; only an OWNER
+may grant OWNER or change an OWNER; otherwise actors manage only lower-ranked
+members and grant roles up to their own rank.
+
+**At least one OWNER** is enforced in two layers:
+
+1. **Application check** (`src/server/organizations/ownership.ts`). Change or
+   remove memberships only through `changeMembershipRole(db, id, role)` and
+   `removeMembership(db, id)`. Inside a transaction they refuse to demote or
+   remove the last OWNER with `OwnerRequiredError`, a 409 `CONFLICT`: "An
+   organization must always have at least one owner. Make another member an
+   owner first." Callers remain responsible for authorization
+   (`member:update-role` / `member:remove` and `assertCanChangeRole`).
+2. **Database backstop**: a deferred constraint trigger
+   (`Membership_organization_has_owner`, migration `auth_and_memberships`)
+   rejects any commit that leaves an existing organization without an OWNER.
+   That covers code that bypasses the check, deleting the owner's user
+   account, and two concurrent demotions that both pass the check.
+   `toAppError` recognises the trigger (SQLSTATE `23514` with its message,
+   whether raised as Prisma `P2039` or at `COMMIT`) and returns the same 409.
+
+To transfer ownership, promote the new owner first, then demote or remove the
+old one. Deleting the whole organization is allowed and cascades to all of its
+memberships.
+
+## 6. Authentication
+
+**Library:** [Better Auth](https://www.better-auth.com) 1.7 with its Prisma
+adapter (`src/server/auth/auth.ts`), mounted at `/api/auth/[...all]`. It was
+chosen over Auth.js because it provides, as maintained library code,
+everything required: email/password with scrypt hashing, database sessions,
+email verification, password reset with session revocation, Google OAuth and
+account linking. Auth.js's credentials provider supports only JWT sessions and
+has no built-in verification or reset.
+
+**Sessions.** Opaque tokens stored in the `Session` table; the browser holds a
+signed, `HttpOnly`, `SameSite=Lax` cookie (`Secure` + `__Secure-` prefix over
+HTTPS). An unsigned token is rejected. The cookie cache is disabled, so every
+request checks the database, and sign-out and revocation take effect
+immediately. Helpers: `getSession`, `getCurrentUser`, `requireSession` (401),
+`requireSessionOrRedirect` (pages).
+
+#### Session lifecycle
+
+The behaviour below was measured on a production build (`npm start`) against
+PostgreSQL, not just read from the configuration.
+
+| Event                                                                                         | Database session (`Session.expiresAt`)                           | Browser cookie                                                                                                  |
+| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Sign-in, email verification (auto sign-in), Google callback                                   | New row, expires in **7 days**                                   | Set, `Max-Age` 7 days                                                                                           |
+| Any authenticated request < 1 day after the last extension                                    | Unchanged                                                        | Unchanged                                                                                                       |
+| **Page request** (full load or client navigation) ≥ 1 day after the last extension            | Extended to now + 7 days                                         | **Not refreshed**: Server Components cannot set cookies, and Better Auth's `nextCookies` plugin skips the write |
+| **Server Action** or **Route Handler** (incl. `/api/auth/*`) ≥ 1 day after the last extension | Extended to now + 7 days                                         | Re-issued with `Max-Age` 7 days                                                                                 |
+| Session past `expiresAt`                                                                      | Row deleted on the next lookup                                   | Cleared; the user is sent to sign-in                                                                            |
+| Sign-out                                                                                      | Row deleted                                                      | Cleared                                                                                                         |
+| Password reset                                                                                | **All** of the user's sessions deleted                           | The user must sign in again                                                                                     |
+| Password change (`/change-password`)                                                          | **All** sessions deleted, one new session created for the caller | Replaced with the new session                                                                                   |
+
+Consequences:
+
+- A session stays valid while the user makes at least one request per 7 days,
+  but the browser keeps the cookie only for 7 days from when it was **last
+  written**: sign-in, or a Server Action / Route Handler call that ran the
+  refresh. A user who only navigates pages (no actions or API calls) for 7 days
+  is signed out when the cookie expires, even though the database row was
+  extended. Once feature Server Actions exist, normal use re-issues the cookie.
+- The database expiry is never earlier than the cookie's, so a cookie the
+  browser still holds is always backed by a valid row, unless it was revoked.
+- The configuration is `expiresIn` 7 days and `updateAge` 1 day
+  (`src/server/auth/auth.ts`). There is no absolute maximum session age beyond
+  the sliding window; add one if a compliance requirement demands it.
+
+**Email verification** uses Better Auth's `emailOTP` plugin instead of the
+default stateless JWT links (which are not stored server-side and can be
+replayed until they expire): 6-digit codes, stored hashed in `Verification`,
+valid 10 minutes, deleted atomically on use, and destroyed after 5 wrong
+attempts. Password sign-in requires a verified address; verifying signs the
+user in. Unused plugin endpoints (OTP sign-in, OTP reset, email change) are
+disabled.
+
+**Password reset:** a single-use token in a link, stored hashed, valid 1 hour,
+consumed atomically. A successful reset revokes all of the user's sessions.
+The request endpoint returns the same response (and does equivalent work)
+whether or not the address is registered. **Duplicate sign-up** returns the
+same response as a new sign-up; the existing owner is emailed instead.
+
+**Google** uses Better Auth's standard provider (PKCE and state), enabled only
+when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are set. Automatic linking to an
+existing account requires that account's email to be verified (prevents
+pre-registration takeover).
+
+**Email delivery:** nodemailer over `SMTP_URL` (`src/server/email`). Sending is
+deferred with Next.js `after()`, so response timing does not reveal whether an
+email was sent. Only the message type is logged, never codes, links or tokens.
+Better Auth's own logging is limited to warnings.
+
+**Rate limiting** (Better Auth, disabled in tests): 5/min for sign-in,
+sign-up, OTP and change-password, 3/min for reset requests, 100/min otherwise,
+counted per client IP. Counters are kept **in the memory of each server
+process**. That is correct for a single instance only; see the production
+requirement in §12.
+
+#### Account-management endpoints
+
+Every Better Auth endpoint was reviewed against ClientFlow's needs. Behaviour
+was verified with requests against the running handler
+(`tests/integration/auth.test.ts`).
+
+| Endpoint                                                             | Decision                                      | Security behaviour                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /change-password`                                              | **Keep** (for a future account-settings page) | Requires a valid session **and the current password**. A wrong password changes nothing. On success **every existing session is revoked** and the caller gets a fresh one. Better Auth leaves this to the client (`revokeOtherSessions`, default `false`); a `hooks.before` in `auth.ts` forces it `true`. Rate limited 5/min. |
+| `POST /update-user`                                                  | **Keep**                                      | Only `name` and `image` can change. `email` is rejected (400); `emailVerified` and other fields are ignored.                                                                                                                                                                                                                   |
+| `GET /list-sessions`                                                 | **Keep**                                      | Lists only the caller's active sessions, and needs a session under 1 day old. The response contains raw session tokens, which are not usable as cookies without the server-side signature; they only serve `revoke-session`.                                                                                                   |
+| `POST /revoke-session`, `/revoke-sessions`, `/revoke-other-sessions` | **Keep**                                      | Operate only on the caller's own sessions; another user's token is ignored.                                                                                                                                                                                                                                                    |
+| `GET /list-accounts`, `POST /link-social`, `/unlink-account`         | **Keep**                                      | Own accounts only. Provider tokens and password hashes are stripped from output; linking requires matching emails.                                                                                                                                                                                                             |
+| `POST /update-session`                                               | **Keep** (inert)                              | No custom session fields are configured, so nothing can be changed. `expiresAt` and `userId` in the body are rejected.                                                                                                                                                                                                         |
+| `POST /change-email`, `/delete-user`                                 | Unavailable (Better Auth defaults)            | Disabled unless explicitly configured (400 / 404). Enabling account deletion needs a decision on sole-owner organizations; the owner invariant blocks it today.                                                                                                                                                                |
+| `GET /verify-email`, `POST /send-verification-email`                 | **Disabled**                                  | The default link verification accepts stateless JWTs that can be replayed and also sign the user in (verified before disabling). ClientFlow never sends them; verification is `/email-otp/*` only.                                                                                                                             |
+| `POST /verify-password`                                              | **Disabled**                                  | Unused; would only be a password-guessing oracle for someone holding a session.                                                                                                                                                                                                                                                |
+| `POST /get-access-token`, `/refresh-token`, `GET /account-info`      | **Disabled**                                  | Would expose Google OAuth tokens and profile to browser JavaScript. ClientFlow does not call Google APIs.                                                                                                                                                                                                                      |
+| Email OTP sign-in / reset / email-change endpoints                   | **Disabled**                                  | Only OTP email verification is used.                                                                                                                                                                                                                                                                                           |
+
+**Route protection:** `src/proxy.ts` redirects requests without a session
+cookie away from `/o/*` and `/onboarding` (a UX optimisation only). The
+security boundary is server code: pages call `requireSessionOrRedirect` /
+`getTenantContextForPage`, actions and routes go through the pipeline.
+
+**Organization bootstrap** (`src/server/organizations/bootstrap.ts`): the
+signed-in user (from the session, never from input) creates an organization;
+the organization and its OWNER membership are created in one transaction.
+Slugs are unique (409 on conflict) and derived from the name when omitted.
+
+### Security headers
+
+| Header                                            | Value / purpose                                                                                                                                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Content-Security-Policy` (pages, `src/proxy.ts`) | Per-request nonce: `script-src 'self' 'nonce-…' 'strict-dynamic'`, `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'none'`, `form-action 'self' https://accounts.google.com`, `upgrade-insecure-requests` on HTTPS |
+| `Content-Security-Policy` (`/api/*`)              | `default-src 'none'; frame-ancestors 'none'`                                                                                                                                                                                |
+| `X-Frame-Options`                                 | `DENY` (clickjacking, legacy browsers)                                                                                                                                                                                      |
+| `X-Content-Type-Options`                          | `nosniff`                                                                                                                                                                                                                   |
+| `Referrer-Policy`                                 | `strict-origin-when-cross-origin`                                                                                                                                                                                           |
+| `Permissions-Policy`                              | camera, microphone, geolocation, payment, usb, topics disabled                                                                                                                                                              |
+| `Cross-Origin-Opener-Policy`                      | `same-origin` (Google sign-in is a redirect, not a popup)                                                                                                                                                                   |
+| `Strict-Transport-Security`                       | production only, 2 years, subdomains                                                                                                                                                                                        |
+
+**Documented CSP exceptions:**
+
+- `style-src 'unsafe-inline'`: React and the UI primitives set inline `style`
+  attributes, which nonces cannot authorise.
+- `'unsafe-eval'` in development only, which React needs for debugging.
+- `form-action https://accounts.google.com`: the "Continue with Google" form
+  may end in a redirect to Google when JavaScript is disabled.
+- Every page renders dynamically (`connection()` in the root layout), because
+  nonces can only be applied to per-request HTML.
+
+## 6a. Client management
+
+**Model.** `Client` (name, company, email, phone, address, notes, `status`
+ACTIVE / INACTIVE / ARCHIVED, `archivedAt`) and `ClientActivity`
+(append-only history: CREATED, UPDATED, ARCHIVED, RESTORED, with the acting
+user and, for updates, `{ field: { from, to } }`). Both are tenant-owned; the
+activity table references its client with a composite key. Note text is never
+copied into the history (only "notes changed").
+
+**Layers.**
+
+- `src/lib/validation/client.ts`: Zod schemas shared by the server and forms.
+  Unknown keys such as `organizationId` are stripped. `ARCHIVED` cannot be set
+  by editing. URL query parsing falls back to defaults on bad input.
+- `src/server/clients/service.ts`: all data access, through the tenant-scoped
+  client only. Each write and its activity row happen in one transaction.
+- `src/app/o/[orgSlug]/clients/actions.ts`: Server Actions built with
+  `tenantAction`.
+- Pages use `tenantPage(orgSlug, permission)`: signed out → sign-in,
+  non-member → 404, role without permission → "no access" state.
+- UI components (`src/components/clients/`) only render data and call
+  actions.
+
+**Permissions.**
+
+| Operation                               | Permission                                             | Roles                 |
+| --------------------------------------- | ------------------------------------------------------ | --------------------- |
+| List, search, view details and activity | `client:read`                                          | all                   |
+| Create                                  | `client:create`                                        | OWNER, ADMIN, MANAGER |
+| Edit                                    | `client:update`                                        | OWNER, ADMIN, MANAGER |
+| Archive / restore                       | `client:delete` (archive is the destructive operation) | OWNER, ADMIN, MANAGER |
+
+The client's projects section on the details page additionally requires
+`project:read`.
+
+**Isolation.** Client ids from the URL or request are looked up through the
+tenant-scoped client, so another organization's client id behaves exactly
+like a nonexistent one: a 404 page, or `NOT_FOUND` from actions. Archived
+clients are read-only until restored (409 on edit). Archiving twice, or
+restoring an active client, is a 409.
+
+**Search and lists.** Case-insensitive substring search over name, company
+and email. `%`, `_` and `\` are escaped, because Prisma's `contains` does not
+escape LIKE wildcards. Filter by status (default: active and inactive), sort
+by name / recently updated / recently added, offset pagination (20 per page,
+max 100) with the page clamped to the last one. Filter, search and page live
+in the URL. Per-status counts respect the current search. Indexes:
+`(organizationId, status, name)` and `(organizationId, updatedAt)`. Substring
+search is a sequential scan within the organization; add a `pg_trgm` GIN
+index if client counts grow large.
+
+**UI states.** The `loading.tsx` skeleton lives in the `(list)` route group so
+it covers only the list. A loading boundary above the details page would make
+`notFound()` respond with HTTP 200 (the shell would already be streaming).
+`error.tsx` covers all client pages.
 
 ## 7. Error handling
 
@@ -286,6 +519,13 @@ Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.
   from `pg_tables`, so new models need no test changes). Test files run
   serially against the one database.
 
+Integration tests also cover authentication, organizations, tenant context and
+authorization end to end. Outgoing email is captured in an in-memory outbox
+(`tests/integration/support/outbox.ts`, installed in `setup.ts`). Better Auth
+is called through its real HTTP handler. Server Actions and the pipeline read
+the session through a `next/headers` stand-in
+(`tests/integration/support/next-request.ts`) carrying a real session cookie.
+
 **CI** (`.github/workflows/ci.yml`) runs against a PostgreSQL 17 service:
 Prisma validate → `npm run check` → integration tests → a drift check
 (`prisma migrate diff` between the migrated test database and
@@ -300,4 +540,17 @@ Any Node.js 24 host (Vercel, Fly.io, Render, a container) plus managed
 PostgreSQL. Build: `npm ci && npm run build` (postinstall runs
 `prisma generate`). Release: `npm run db:deploy` before starting the new
 version. Use a pooled connection string (e.g. PgBouncer) on serverless
-platforms.
+platforms. Configure `BETTER_AUTH_SECRET`, an HTTPS `BETTER_AUTH_URL`, a real
+SMTP provider (`SMTP_URL`, `EMAIL_FROM`, preferably `smtps://`) and,
+optionally, Google OAuth credentials.
+
+> **Production deployment task: shared rate-limit storage.** The
+> authentication rate limiter keeps its counters in each server process's
+> memory. That is correct for **one** application instance. With several
+> instances (horizontal scaling, serverless, rolling deploys), each keeps its
+> own counters, so the effective limit multiplies by the number of instances,
+> and counters reset on every restart or cold start. **Before running more
+> than one instance**, configure Better Auth's `rateLimit.storage` as
+> `"database"` (adds a table via migration) or `"secondary-storage"` (e.g.
+> Redis), and confirm client IPs are taken from the trusted proxy header
+> (`advanced.ipAddress`). Until then, deploy a single instance.
