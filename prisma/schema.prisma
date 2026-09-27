@@ -1,0 +1,68 @@
+// ClientFlow database schema.
+// The connection URL lives in prisma.config.ts, not here (Prisma 7+).
+//
+// Tenancy rules (see docs/architecture.md §4 and src/server/tenancy/):
+// - Every tenant-owned model has a required `organizationId` and
+//   `@@unique([organizationId, id])`, so children can reference it with a
+//   composite foreign key. That unique index also serves as the
+//   organization-leading index for tenant-wide queries.
+// - A child references a tenant-owned parent with BOTH columns:
+//   `fields: [organizationId, parentId], references: [organizationId, id]`.
+//   PostgreSQL then rejects any link between rows of different organizations.
+// - Every new model must be classified in src/server/tenancy/models.ts.
+//
+// The models below are intentionally minimal: they establish the tenancy
+// structure only. Feature milestones add their remaining fields.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// The tenant. Root of every tenant-owned record.
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clients  Client[]
+  projects Project[]
+}
+
+/// Tenant-owned parent resource.
+model Client {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projects     Project[]
+
+  @@unique([organizationId, id])
+}
+
+/// Tenant-owned child of Client.
+model Project {
+  id             String   @id @default(cuid())
+  organizationId String
+  clientId       String
+  name           String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // Composite FK: the client must belong to the same organization.
+  client       Client       @relation(fields: [organizationId, clientId], references: [organizationId, id], onDelete: NoAction)
+
+  @@unique([organizationId, id])
+  @@index([organizationId, clientId])
+}
