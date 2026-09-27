@@ -1,4 +1,4 @@
-import { LayoutDashboard, type LucideIcon, Users } from "lucide-react";
+import { FolderKanban, LayoutDashboard, type LucideIcon, Users } from "lucide-react";
 
 export type NavItem = {
   title: string;
@@ -14,4 +14,5 @@ export type NavItem = {
 export const mainNavigation: NavItem[] = [
   { title: "Overview", href: "", icon: LayoutDashboard },
   { title: "Clients", href: "/clients", icon: Users },
+  { title: "Projects", href: "/projects", icon: FolderKanban },
 ];

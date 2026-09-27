@@ -1,11 +1,10 @@
-import { SearchX, Users } from "lucide-react";
+import { FolderKanban, SearchX } from "lucide-react";
 import Link from "next/link";
 
 import { EmptyState } from "@/components/shared/empty-state";
 import { buttonVariants } from "@/components/ui/button";
 
-/** Shown when the list is empty: either no clients yet, or nothing matches the filters. */
-export function ClientsEmptyState({
+export function ProjectsEmptyState({
   filtered,
   basePath,
   canCreate,
@@ -18,8 +17,8 @@ export function ClientsEmptyState({
     return (
       <EmptyState
         icon={SearchX}
-        title="No matching clients"
-        description="Try a different search or status filter."
+        title="No matching projects"
+        description="Try a different search, status or client filter."
         action={
           <Link href={basePath} className={buttonVariants({ variant: "outline" })}>
             Clear filters
@@ -30,17 +29,17 @@ export function ClientsEmptyState({
   }
   return (
     <EmptyState
-      icon={Users}
-      title="No clients yet"
+      icon={FolderKanban}
+      title="No projects yet"
       description={
         canCreate
-          ? "Add your first client to keep their contact details, notes and history in one place."
-          : "Clients added by your team will appear here."
+          ? "Create a project to track its status, dates, progress and team."
+          : "Projects created by your team will appear here."
       }
       action={
         canCreate && (
           <Link href={`${basePath}/new`} className={buttonVariants()}>
-            Add client
+            New project
           </Link>
         )
       }

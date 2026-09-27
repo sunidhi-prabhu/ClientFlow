@@ -174,7 +174,12 @@ export default async function ClientDetailsPage({
                   <ul className="grid gap-2 text-sm">
                     {projects.map((project) => (
                       <li key={project.id} className="flex justify-between gap-2">
-                        <span className="truncate">{project.name}</span>
+                        <Link
+                          href={`/o/${slug}/projects/${project.id}`}
+                          className="truncate hover:underline"
+                        >
+                          {project.name}
+                        </Link>
                         <span className="text-muted-foreground tabular-nums">
                           {dateFormat.format(project.createdAt)}
                         </span>

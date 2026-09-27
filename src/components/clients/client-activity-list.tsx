@@ -1,3 +1,4 @@
+import { ActivityTimeline } from "@/components/shared/activity-timeline";
 import { type ClientActivityType } from "@/generated/prisma/enums";
 
 export type ClientActivityItem = {
@@ -18,8 +19,6 @@ const FIELD_LABELS: Record<string, string> = {
   status: "status",
 };
 
-const timeFormat = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" });
-
 function describe(item: ClientActivityItem): string {
   switch (item.type) {
     case "CREATED":
@@ -38,26 +37,14 @@ function describe(item: ClientActivityItem): string {
 }
 
 export function ClientActivityList({ items }: { items: ClientActivityItem[] }) {
-  if (items.length === 0) {
-    return <p className="text-sm text-muted-foreground">No activity yet.</p>;
-  }
   return (
-    <ol className="relative grid gap-4 border-l pl-4">
-      {items.map((item) => (
-        <li key={item.id} className="relative">
-          <span
-            aria-hidden
-            className="absolute top-1.5 -left-[21px] size-2.5 rounded-full border-2 border-background bg-primary"
-          />
-          <p className="text-sm">
-            <span className="font-medium">{item.actor?.name ?? "A former member"}</span>{" "}
-            {describe(item)}
-          </p>
-          <time dateTime={item.createdAt.toISOString()} className="text-xs text-muted-foreground">
-            {timeFormat.format(item.createdAt)}
-          </time>
-        </li>
-      ))}
-    </ol>
+    <ActivityTimeline
+      items={items.map((item) => ({
+        id: item.id,
+        actorName: item.actor?.name ?? null,
+        description: describe(item),
+        createdAt: item.createdAt,
+      }))}
+    />
   );
 }

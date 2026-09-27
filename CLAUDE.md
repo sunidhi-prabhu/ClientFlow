@@ -93,6 +93,11 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
 - Escape `%`, `_`, `\` before Prisma `contains` searches (see `escapeLikePattern` in the clients service).
 - Don't put `loading.tsx` above a page that calls `notFound()`: the streamed shell turns the 404 into a 200.
   Scope list skeletons with a route group (e.g. `clients/(list)/loading.tsx`).
+- Reuse `src/components/shared/` (ActivityTimeline, EmptyState, ListPagination, ArchiveButton, ListSearchInput +
+  useListSearch, ProgressBar, SegmentError) and `escapeLikePattern` (`src/server/search.ts`) instead of copying them.
+- Cross-entity references (e.g. project → client, project member → membership) get a composite FK on
+  `(organizationId, …)` **and** an explicit tenant-client lookup before the write (clear 404 / 409 messages).
+- Calendar dates (`@db.Date`) are UTC midnight: parse `YYYY-MM-DD` as UTC and format with `timeZone: "UTC"`.
 - Navigation that looks like a button: `<Link className={buttonVariants()}>`, not `<Button render={<Link/>}>` (which
   gives the link `role="button"`).
 

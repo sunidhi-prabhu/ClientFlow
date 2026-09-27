@@ -434,6 +434,90 @@ it covers only the list. A loading boundary above the details page would make
 `notFound()` respond with HTTP 200 (the shell would already be streaming).
 `error.tsx` covers all client pages.
 
+## 6b. Project management
+
+**Model.**
+
+- `Project`: name, description, optional `clientId`, `status` (PLANNING,
+  ACTIVE, ON_HOLD, COMPLETED, ARCHIVED), `priority` (LOW … URGENT),
+  `startDate`/`dueDate` (calendar days, `DATE`), `progress` 0–100,
+  `archivedAt`, and `statusBeforeArchive` (so restore returns to the previous
+  status).
+- `ProjectMember`: `(organizationId, projectId, userId)`.
+- `ProjectActivity`: the same pattern as `ClientActivity`. Types: CREATED,
+  UPDATED, STATUS_CHANGED, ARCHIVED, RESTORED, MEMBER_ADDED, MEMBER_REMOVED.
+  Description text is never copied into the history.
+
+**Database guarantees** (migration `project_management`):
+
+- **Client:** `Project(organizationId, clientId) → Client(organizationId, id)`.
+  A client, if set, must be in the same organization. A NULL `clientId` means
+  "no client" (`MATCH SIMPLE`).
+- **Members:**
+  `ProjectMember(organizationId, userId) → Membership(organizationId, userId)`.
+  A project member must be a member of the organization, and leaving the
+  organization removes the person from its projects (cascade).
+  `ProjectMember(organizationId, projectId) → Project` cascades.
+  `UNIQUE (organizationId, projectId, userId)`.
+- **CHECK constraints:** `progress BETWEEN 0 AND 100`, and
+  `dueDate >= startDate` when both are set. Prisma cannot express these; they
+  live in the migration SQL.
+- **Indexes:** `(organizationId, status, name)`, `(organizationId, clientId)`,
+  `(organizationId, updatedAt)`, `ProjectMember (organizationId, userId)`,
+  `ProjectActivity (organizationId, projectId, createdAt)`.
+
+**Layers** (same as clients):
+
+- `src/lib/validation/project.ts`;
+- `src/server/projects/service.ts` (tenant database only; every change and its
+  activity row in one transaction);
+- `src/app/o/[orgSlug]/projects/actions.ts` (`tenantAction`);
+- pages via `tenantPage`;
+- `src/components/projects/`.
+
+**Permissions** (existing RBAC; no new permissions):
+
+| Operation                                                 | Permission       | Roles                 |
+| --------------------------------------------------------- | ---------------- | --------------------- |
+| List, search, view details, team and activity             | `project:read`   | all                   |
+| Create                                                    | `project:create` | OWNER, ADMIN, MANAGER |
+| Edit fields, set status, set progress, add/remove members | `project:update` | OWNER, ADMIN, MANAGER |
+| Archive / restore                                         | `project:delete` | OWNER, ADMIN, MANAGER |
+
+**Isolation.**
+
+- **Projects:** every project id is looked up through the tenant client, so
+  another organization's project is a 404 (page) or `NOT_FOUND` (action) for
+  every operation, including member management.
+- **Clients and members:** a client id or user id is checked through the tenant
+  client before a write. A foreign or nonexistent id gives the same
+  `404 Referenced resource not found`, and the composite FKs above are the
+  database backstop.
+- **Archived records:** assigning an archived client is a 409 (an existing
+  archived assignment is kept). Archived projects are read-only (409) until
+  restored.
+
+**Lists.**
+
+- **Search:** name, description and client name, with wildcards escaped via
+  the shared `escapeLikePattern`.
+- **Filters:** status (default: all except archived) and client (a client or
+  "no client").
+- **Sort:** name, due date (empty last), priority, recently updated or
+  recently added.
+- **Pagination:** 20 per page, clamped to the last page.
+- **Query count:** a page with client names and member counts takes 4 SQL
+  statements regardless of size (asserted by a query-counting integration
+  test).
+- **Overdue:** a project is overdue when it is past its due date (UTC) and not
+  completed or archived.
+
+**Tasks** are not implemented; the details page shows a placeholder section.
+
+**Shared UI** (`src/components/shared/`), used by clients and projects:
+`ActivityTimeline`, `EmptyState`, `ListPagination`, `ArchiveButton`,
+`ListSearchInput`/`useListSearch`, `ProgressBar` and `SegmentError`.
+
 ## 7. Error handling
 
 Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.

@@ -1,17 +1,14 @@
 "use client";
 
-import { Loader2, Search } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useTransition } from "react";
 
-import { Input } from "@/components/ui/input";
+import { ListSearchInput, useListSearch } from "@/components/shared/list-search";
 import { NativeSelect } from "@/components/ui/native-select";
 import { type ClientStatus } from "@/generated/prisma/enums";
 import { type ClientSort, type ClientStatusFilter } from "@/lib/validation/client";
 
 import { clientsListHref } from "./clients-url";
-
-const SEARCH_DEBOUNCE_MS = 300;
 
 export const STATUS_FILTER_LABELS: Record<ClientStatusFilter, string> = {
   current: "Active & inactive",
@@ -47,22 +44,12 @@ export function ClientsToolbar({
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [search, setSearch] = useState(q);
-  const [lastQ, setLastQ] = useState(q);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-
-  // Follow URL changes made elsewhere ("Clear filters", back/forward) without
-  // overwriting what the user is typing (the URL holds the trimmed value).
-  if (q !== lastQ) {
-    setLastQ(q);
-    if (q !== search.trim()) setSearch(q);
-  }
-  useEffect(() => () => clearTimeout(timer.current), []);
+  const search = useListSearch(q, (value) => navigate({ q: value }));
 
   function navigate(next: { q?: string; status?: ClientStatusFilter; sort?: ClientSort }) {
-    clearTimeout(timer.current);
+    search.cancel();
     const href = clientsListHref(basePath, {
-      q: (next.q ?? search).trim(),
+      q: (next.q ?? search.value).trim(),
       status: next.status ?? status,
       sort: next.sort ?? sort,
     });
@@ -88,33 +75,13 @@ export function ClientsToolbar({
       }}
       className="flex flex-col gap-2 sm:flex-row sm:items-center"
     >
-      <div className="relative flex-1">
-        <Search
-          className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
-          aria-hidden
-        />
-        <Input
-          type="search"
-          name="q"
-          aria-label="Search clients"
-          placeholder="Search by name, company or email"
-          value={search}
-          maxLength={100}
-          onChange={(event) => {
-            const value = event.target.value;
-            setSearch(value);
-            clearTimeout(timer.current);
-            timer.current = setTimeout(() => navigate({ q: value }), SEARCH_DEBOUNCE_MS);
-          }}
-          className="pl-8"
-        />
-        {pending && (
-          <Loader2
-            className="absolute top-1/2 right-2.5 size-4 -translate-y-1/2 animate-spin text-muted-foreground"
-            aria-label="Updating results"
-          />
-        )}
-      </div>
+      <ListSearchInput
+        label="Search clients"
+        placeholder="Search by name, company or email"
+        value={search.value}
+        onChange={search.change}
+        pending={pending}
+      />
       <div className="flex gap-2">
         <NativeSelect
           name="status"

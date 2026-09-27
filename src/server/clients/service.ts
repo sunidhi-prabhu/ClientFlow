@@ -3,6 +3,7 @@ import "server-only";
 import { type ClientStatus } from "@/generated/prisma/enums";
 import { ConflictError, NotFoundError } from "@/lib/errors";
 import { type ClientFields, type ListClientsQuery } from "@/lib/validation/client";
+import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
 
@@ -138,15 +139,6 @@ function statusWhere(status: ListClientsQuery["status"]) {
     default:
       return { status };
   }
-}
-
-/**
- * Prisma's `contains` becomes `ILIKE '%…%'` without escaping, so `%` and `_`
- * in user input would act as wildcards. Escape them (PostgreSQL's default
- * LIKE escape character is the backslash).
- */
-function escapeLikePattern(value: string) {
-  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 function searchWhere(q: string | undefined) {
