@@ -697,6 +697,66 @@ cleanly: the app shell and actions are `print:hidden`, and transient UI state
 recurring invoices, per-organization default currency or tax, emailing
 invoices, and an invoice activity history (lifecycle timestamps are stored).
 
+## 6e. Dashboard
+
+The organization home page (`/o/[orgSlug]`, in the `(overview)` route group
+so its `loading.tsx` does not wrap other routes) shows:
+
+- headline metrics: clients, active projects, open tasks, overdue invoices,
+  total invoiced and total paid;
+- progress of active projects;
+- tasks by status;
+- an invoice status summary;
+- recent project/task activity and recent client activity.
+
+**Access.** The page uses `tenantPage(orgSlug, "organization:read")`. The
+organization and role come from the session and membership, never from the
+request; only the URL slug is read, and a non-member gets a 404.
+`getDashboard(db, role, now)` in `src/server/dashboard/service.ts` gates each
+section by permission:
+
+| Section  | Permission     |
+| -------- | -------------- |
+| Clients  | `client:read`  |
+| Projects | `project:read` |
+| Tasks    | `task:read`    |
+| Invoices | `invoice:read` |
+
+A section the role cannot read is returned as `null` and its queries are not
+run, so MEMBER never queries invoices.
+
+**Queries.** Every metric is computed in PostgreSQL through the tenant-scoped
+client. One concurrent batch makes 13 SQL statements, a number that does not
+change with data size (see the query-count test):
+
+- `groupBy(status)` for clients, projects and tasks.
+- Two invoice aggregates:
+  - `groupBy(status, currency)` with `_count` and `_sum(totalCents)`;
+  - the derived OVERDUE group (`status = ISSUED AND dueDate < todayUtc(now)`,
+    the same rule as the invoice list), by currency.
+- Three capped lists, each with Prisma's batched `IN (…)` relation loads:
+  - the 5 active projects due soonest, with open-task counts computed in the
+    same statement;
+  - the 8 latest `ProjectActivity` rows (task events included);
+  - the 8 latest `ClientActivity` rows.
+
+The activity feeds are served by the `(organizationId, createdAt)` indexes
+added in migration `dashboard_activity_indexes`. Nothing is cached.
+
+**Definitions:**
+
+- **Total clients:** ACTIVE + INACTIVE; archived clients are excluded.
+- **Open tasks:** not DONE, in projects that are not archived.
+- **Total invoiced:** ISSUED (including overdue) + PAID.
+- **Total paid:** PAID.
+- **Outstanding:** ISSUED.
+- Drafts and cancelled invoices appear only in the status summary.
+
+**Money.** Totals are integer cents per currency (`summarizeInvoices` in
+`src/lib/dashboard.ts`). Different currencies are listed separately and never
+added together. A sum outside the exact integer range throws instead of
+rounding.
+
 ## 7. Error handling
 
 Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.

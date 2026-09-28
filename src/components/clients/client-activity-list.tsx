@@ -19,7 +19,7 @@ const FIELD_LABELS: Record<string, string> = {
   status: "status",
 };
 
-function describe(item: ClientActivityItem): string {
+export function describeClientActivity(item: ClientActivityItem): string {
   switch (item.type) {
     case "CREATED":
       return "added this client";
@@ -42,7 +42,7 @@ export function ClientActivityList({ items }: { items: ClientActivityItem[] }) {
       items={items.map((item) => ({
         id: item.id,
         actorName: item.actor?.name ?? null,
-        description: describe(item),
+        description: describeClientActivity(item),
         createdAt: item.createdAt,
       }))}
     />

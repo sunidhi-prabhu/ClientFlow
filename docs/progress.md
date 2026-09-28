@@ -11,9 +11,75 @@ Status of each milestone and how it was verified. Design details are in
 | Client management                                                  | Complete | `0a3aad0`               |
 | Project management                                                 | Complete | `9760cdc`               |
 | Task management / Kanban                                           | Complete | `ae13b04`               |
-| Invoices                                                           | Complete | _pending (next commit)_ |
+| Invoices                                                           | Complete | `09634fa`               |
+| Dashboard                                                          | Complete | _pending (next commit)_ |
 | Member management (invitations, role changes)                      | Planned  |                         |
-| Audit logs, reporting, dashboard                                   | Planned  |                         |
+| Audit logs, security audit, UI polish, performance review          | Planned  |                         |
+
+## Dashboard (completed 2026-09-28)
+
+**Scope:** the organization overview page. It shows:
+
+- total clients, active projects, open tasks and overdue invoices;
+- total invoiced and total paid, per currency;
+- progress of active projects and tasks by status;
+- an invoice status summary;
+- recent project/task activity and recent client activity.
+
+Other features:
+
+- loading skeleton, section empty states, and a welcome state for an empty
+  organization;
+- error boundary;
+- responsive layout.
+
+Everything is computed on the server with aggregate queries, scoped to the
+caller's organization and gated by role (MEMBER sees no invoice data). Design:
+[architecture.md §6e](architecture.md#6e-dashboard).
+
+**Verification:**
+
+- **Unit tests:** 236/236, including 5 for the dashboard's money arithmetic
+  and 9 for the dashboard component.
+- **Integration tests:** 313/313 against real PostgreSQL, 17 of them for the
+  dashboard:
+  - exact metrics, and derived OVERDUE, including the due-today and midnight
+    UTC boundary;
+  - per-currency cent totals, and consistency with the invoice list's counts;
+  - activity feeds and their caps;
+  - an empty organization;
+  - tenant isolation through the session pipeline, and non-member and
+    signed-out access;
+  - the role matrix, including MEMBER running no invoice queries;
+  - a database failure mapped to a generic error;
+  - a query-count test: 13 statements regardless of data size.
+- **Real browser (Chromium via Playwright, production build), 28/28:**
+  - skeleton streamed first, then the empty-organization state;
+  - a client created through the UI appears in the activity feed;
+  - every metric matches values computed independently in SQL, with exact
+    money and the derived overdue count;
+  - project progress, task distribution and the invoice summary;
+  - drill-down links;
+  - another organization's dashboard returns 404 and none of its data
+    appears;
+  - mobile (390 px) without horizontal overflow;
+  - MEMBER sees no invoice data or create links, and signing out redirects to
+    sign-in;
+  - no console or CSP errors besides the deliberate 404.
+
+**Bugs found and fixed during verification:**
+
+- **Zero-currency noise:** the "outstanding" line listed currencies with
+  nothing outstanding (e.g. "€0.00 + …").
+- **Oversized amounts in the invoice summary:** multi-currency amounts used
+  the metric-card size.
+
+**Known follow-ups:**
+
+- Activity times are formatted in the server's time zone, the same as the
+  existing activity timelines. Per-user time zones are not supported yet.
+- No org-wide task list exists yet, so task counts do not link anywhere.
+- Browser checks are an ad-hoc script, not part of CI yet.
 
 ## Invoices (completed 2026-09-28)
 

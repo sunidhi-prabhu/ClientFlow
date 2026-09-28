@@ -57,7 +57,7 @@ const TASK_FIELD_LABELS: Record<string, string> = {
   description: "description",
 };
 
-function describe(item: ProjectActivityItem): string {
+export function describeProjectActivity(item: ProjectActivityItem): string {
   const changes = (item.changes ?? {}) as Changes;
   const task = changes.task?.title ?? "a task";
   switch (item.type) {
@@ -109,7 +109,7 @@ export function ProjectActivityList({ items }: { items: ProjectActivityItem[] })
       items={items.map((item) => ({
         id: item.id,
         actorName: item.actor?.name ?? null,
-        description: describe(item),
+        description: describeProjectActivity(item),
         createdAt: item.createdAt,
       }))}
     />

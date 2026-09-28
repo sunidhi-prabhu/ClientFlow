@@ -138,6 +138,8 @@ model ClientActivity {
 
   @@unique([organizationId, id])
   @@index([organizationId, clientId, createdAt])
+  // Dashboard: the organization's most recent client activity.
+  @@index([organizationId, createdAt])
 }
 
 enum ProjectStatus {
@@ -254,6 +256,8 @@ model ProjectActivity {
   @@unique([organizationId, id])
   @@index([organizationId, projectId, createdAt])
   @@index([organizationId, taskId, createdAt])
+  // Dashboard: the organization's most recent project and task activity.
+  @@index([organizationId, createdAt])
 }
 
 enum TaskStatus {
