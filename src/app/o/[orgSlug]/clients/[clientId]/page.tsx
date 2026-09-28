@@ -9,9 +9,14 @@ import { ClientStatusBadge } from "@/components/clients/client-status-badge";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { InvoiceStatusBadge } from "@/components/invoices/invoice-status-badge";
 import { NotFoundError } from "@/lib/errors";
+import { formatInvoiceNumber, invoiceDisplayStatus } from "@/lib/invoices";
+import { formatMoney } from "@/lib/money";
+import { listInvoicesQuery } from "@/lib/validation/invoice";
 import { hasPermission } from "@/lib/permissions";
 import { getClient, listClientActivity, listClientProjects } from "@/server/clients/service";
+import { listInvoices } from "@/server/invoices/service";
 import { tenantPage } from "@/server/protected";
 
 import { archiveClientAction, restoreClientAction } from "../actions";
@@ -35,9 +40,13 @@ export default async function ClientDetailsPage({
     throw error;
   });
   const canSeeProjects = hasPermission(ctx.role, "project:read");
-  const [activity, projects] = await Promise.all([
+  const canSeeInvoices = hasPermission(ctx.role, "invoice:read");
+  const [activity, projects, invoices] = await Promise.all([
     listClientActivity(db, client.id),
     canSeeProjects ? listClientProjects(db, client.id) : Promise.resolve([]),
+    canSeeInvoices
+      ? listInvoices(db, listInvoicesQuery.parse({ clientId: client.id, pageSize: 5 }))
+      : Promise.resolve(null),
   ]);
 
   const slug = ctx.organization.slug;
@@ -195,10 +204,39 @@ export default async function ClientDetailsPage({
                   <Receipt className="size-4" aria-hidden /> Invoices
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Invoicing is not available yet. This client&apos;s invoices will appear here.
-                </p>
+              <CardContent className="grid gap-3">
+                {!invoices ? (
+                  <p className="text-sm text-muted-foreground">Your role cannot view invoices.</p>
+                ) : invoices.items.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No invoices for this client yet.</p>
+                ) : (
+                  <ul className="grid gap-2 text-sm">
+                    {invoices.items.map((invoice) => (
+                      <li key={invoice.id} className="flex items-center justify-between gap-2">
+                        <Link
+                          href={`/o/${slug}/invoices/${invoice.id}`}
+                          className="tabular-nums hover:underline"
+                        >
+                          {formatInvoiceNumber(invoice.number)}
+                        </Link>
+                        <span className="flex items-center gap-2">
+                          <InvoiceStatusBadge status={invoiceDisplayStatus(invoice)} />
+                          <span className="tabular-nums">
+                            {formatMoney(invoice.totalCents, invoice.currency)}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {invoices && hasPermission(ctx.role, "invoice:create") && !archived && (
+                  <Link
+                    href={`/o/${slug}/invoices/new?clientId=${client.id}`}
+                    className="text-sm font-medium text-primary hover:underline"
+                  >
+                    New invoice for this client
+                  </Link>
+                )}
               </CardContent>
             </Card>
           </div>

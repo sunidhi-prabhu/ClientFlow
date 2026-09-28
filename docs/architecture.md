@@ -603,6 +603,100 @@ cards, with a notice to use the filters. Filters (search over title and
 description, assignee including "unassigned", priority) are URL parameters on
 the project page.
 
+## 6d. Invoice management
+
+**Model** (migration `invoice_management`):
+
+- `Invoice`: client, per-organization `number` (assigned on issue), `status`,
+  `currency` (2-decimal ISO 4217: USD, EUR, GBP, INR, CAD, AUD), `issueDate`,
+  `dueDate`, notes, `discountBps`/`taxBps`, stored totals (`subtotalCents`,
+  `discountCents`, `taxCents`, `totalCents`), and
+  `issuedAt`/`paidAt`/`cancelledAt`.
+- `InvoiceItem`: description, `quantityMilli`, `unitPriceCents`,
+  `amountCents`, position.
+- `Organization.invoiceSequence`: the per-organization numbering counter.
+
+**Money** (`src/lib/money.ts`, pure, shared by server and UI):
+
+- **Units:** amounts in integer cents; quantities in thousandths (1.5 →
+  1500); rates in basis points (18.25% → 1825).
+- **Arithmetic:** line amount = quantity × unit price, and percentages are
+  computed with BigInt and rounded half-up to the cent. No floating-point
+  arithmetic is used for money, and display goes through
+  `Intl.NumberFormat` with exact decimal strings.
+- **Order:** discount = subtotal × discount rate; tax = (subtotal − discount)
+  × tax rate; total = subtotal − discount + tax.
+- **Limits:** each amount and total is at most 10,000,000.00 (fits 32-bit
+  integers); at most 200 items per invoice.
+- **Inputs:** decimal strings are parsed exactly. A client-supplied line
+  amount or total is never accepted; the server recomputes everything.
+
+**States.** Stored: DRAFT, ISSUED, PAID, CANCELLED. OVERDUE is derived
+(ISSUED with a due date before today, UTC) for display, filtering and counts.
+It needs no scheduler and can never be stale.
+
+| From                   | To        | Action                                                                                     | Permission                      |
+| ---------------------- | --------- | ------------------------------------------------------------------------------------------ | ------------------------------- |
+| —                      | DRAFT     | create                                                                                     | `invoice:create`                |
+| DRAFT                  | DRAFT     | edit header, add/edit/remove items                                                         | `invoice:update`                |
+| DRAFT                  | ISSUED    | issue (needs ≥ 1 item, total > 0, due date not in the past; assigns number and issue date) | `invoice:send`                  |
+| ISSUED (incl. overdue) | PAID      | mark paid                                                                                  | `invoice:update`                |
+| DRAFT or ISSUED        | CANCELLED | cancel                                                                                     | `invoice:delete` (OWNER, ADMIN) |
+
+Anything else is a 409 (PAID and CANCELLED are final; paid invoices cannot be
+cancelled). MEMBER has no invoice permissions: the nav item is hidden, the
+pages show "no access", and the PDF route returns 403.
+
+**Consistency:**
+
+- **Lock-and-check:** every change to a draft starts with
+  `UPDATE Invoice … WHERE id = ? AND status = 'DRAFT'`. That one statement
+  checks the state and takes the invoice's row lock, so concurrent edits are
+  serialized.
+- **Recompute in the same transaction:** totals are recomputed from the
+  stored line amounts within that transaction, so they always match the items.
+- **Transitions** are compare-and-set updates.
+- **Numbering:** issuing increments `Organization.invoiceSequence` atomically,
+  which locks the organization row. Numbers are unique
+  (`UNIQUE (organizationId, number)`) and gap-free among issued invoices.
+  Drafts have no number.
+
+**Database guarantees** (independent of application code):
+
+- **Composite FKs:** invoice → client, and item → invoice, both within the
+  same organization.
+- **CHECK constraints:** `total = subtotal − discount + tax` with every amount
+  ≥ 0 and discount ≤ subtotal; rates 0–10000; currency `^[A-Z]{3}$`; the
+  issuing fields (number, issue date, issued-at) are set together or not at
+  all (drafts none; issued and paid all; cancelled either); due ≥ issue date;
+  `paidAt` iff PAID; `cancelledAt` iff CANCELLED; items have quantity > 0,
+  price and amount ≥ 0, and a non-empty description.
+- **Triggers:**
+  - `Invoice_guard` allows only the transitions above. Once an invoice is not
+    a draft, only status, `paidAt`, `cancelledAt` and `updatedAt` may change,
+    and non-draft invoices cannot be deleted.
+  - `InvoiceItem_guard` blocks any insert, update or delete of items unless
+    the invoice is a draft.
+  - Deletes that are part of an organization cascade
+    (`pg_trigger_depth() > 1`) are allowed, so organizations can still be
+    deleted.
+
+**Isolation.** Invoice, item and client ids are looked up through the
+tenant-scoped client: another organization's ids are 404, and the same goes
+for a foreign or nonexistent client. Archived clients cannot be invoiced
+(409).
+
+**Download and print.** `GET /api/o/[orgSlug]/invoices/[invoiceId]/pdf`
+(`tenantRoute`, `invoice:read`) returns an A4 PDF generated with `pdf-lib`.
+Its standard fonts only encode WinAnsi, so unsupported characters are
+replaced and amounts use the currency code. The details page also prints
+cleanly: the app shell and actions are `print:hidden`, and transient UI state
+(e.g. an old validation error) is reset when the invoice becomes read-only.
+
+**Not included (by scope):** partial payments, refunds or credit notes,
+recurring invoices, per-organization default currency or tax, emailing
+invoices, and an invoice activity history (lifecycle timestamps are stored).
+
 ## 7. Error handling
 
 Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.

@@ -1,10 +1,14 @@
-import { FolderKanban, LayoutDashboard, type LucideIcon, Users } from "lucide-react";
+import { FolderKanban, LayoutDashboard, type LucideIcon, Receipt, Users } from "lucide-react";
+
+import { type Permission } from "@/lib/permissions";
 
 export type NavItem = {
   title: string;
   /** Path inside the organization, appended to `/o/[orgSlug]` ("" = its home). */
   href: string;
   icon: LucideIcon;
+  /** Hide the item from roles without this permission (the page checks it too). */
+  permission?: Permission;
 };
 
 /**
@@ -15,4 +19,5 @@ export const mainNavigation: NavItem[] = [
   { title: "Overview", href: "", icon: LayoutDashboard },
   { title: "Clients", href: "/clients", icon: Users },
   { title: "Projects", href: "/projects", icon: FolderKanban },
+  { title: "Invoices", href: "/invoices", icon: Receipt, permission: "invoice:read" },
 ];

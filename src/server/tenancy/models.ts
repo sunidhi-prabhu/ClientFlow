@@ -31,6 +31,8 @@ export const modelPolicies = {
   ProjectMember: { scope: "tenant", scalarFields: Prisma.ProjectMemberScalarFieldEnum },
   ProjectActivity: { scope: "tenant", scalarFields: Prisma.ProjectActivityScalarFieldEnum },
   Task: { scope: "tenant", scalarFields: Prisma.TaskScalarFieldEnum },
+  Invoice: { scope: "tenant", scalarFields: Prisma.InvoiceScalarFieldEnum },
+  InvoiceItem: { scope: "tenant", scalarFields: Prisma.InvoiceItemScalarFieldEnum },
   // Authentication (Better Auth): accessed only through src/server/auth.
   User: { scope: "global", scalarFields: Prisma.UserScalarFieldEnum },
   Session: { scope: "global", scalarFields: Prisma.SessionScalarFieldEnum },

@@ -106,15 +106,21 @@ async function readRequestInput(request: Request): Promise<unknown> {
  */
 export function tenantRoute<Schema extends z.ZodType, Context extends OrganizationRouteContext>(
   options: TenantOptions<Schema>,
-  handler: (args: TenantHandlerArgs<z.infer<Schema>> & { request: Request }) => Promise<Response>,
+  handler: (
+    args: TenantHandlerArgs<z.infer<Schema>> & {
+      request: Request;
+      /** All route params (e.g. `invoiceId`); ids in them must be looked up via `db`. */
+      params: Awaited<Context["params"]>;
+    },
+  ) => Promise<Response>,
 ) {
   return withErrorHandling(async (request: Request, context: Context) => {
-    const { orgSlug } = await context.params;
+    const params = (await context.params) as Awaited<Context["params"]>;
     return runTenantPipeline(
-      orgSlug,
+      params.orgSlug,
       options,
       () => readRequestInput(request),
-      (args) => handler({ ...args, request }),
+      (args) => handler({ ...args, request, params }),
     );
   });
 }

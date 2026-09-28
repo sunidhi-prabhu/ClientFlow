@@ -110,7 +110,12 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
 ## Conventions
 
 - Validate all external input (request bodies, form data, params) with Zod.
-- Money = integer minor units + currency code. IDs = cuid. Timestamps UTC.
+- Money = integer minor units + currency code. IDs = cuid. Timestamps UTC. All money math goes through
+  `src/lib/money.ts` (BigInt, half-up rounding; quantities in thousandths, rates in basis points). Never do money
+  arithmetic with floats, and never trust amounts or totals from the client: recompute on the server.
+- Records that become immutable (e.g. issued invoices): enforce in the service (lock-and-check with
+  `updateMany WHERE status = …`) **and** in the database (trigger), and let organization cascades through
+  (`pg_trigger_depth() > 1`).
 - UI: use `src/components/ui` (shadcn; add with `npx shadcn@latest add <name>`), Tailwind tokens (`bg-primary`,
   `text-muted-foreground`), never hard-coded colors. Must work at mobile widths.
 - Only add a nav item (`src/config/navigation.ts`) when its route exists. No placeholder or mock features.

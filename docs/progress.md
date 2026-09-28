@@ -10,10 +10,70 @@ Status of each milestone and how it was verified. Design details are in
 | Authentication, organizations, RBAC, security headers              | Complete | `0a3aad0`               |
 | Client management                                                  | Complete | `0a3aad0`               |
 | Project management                                                 | Complete | `9760cdc`               |
-| Task management / Kanban                                           | Complete | _pending (next commit)_ |
-| Invoices                                                           | Next     |                         |
+| Task management / Kanban                                           | Complete | `ae13b04`               |
+| Invoices                                                           | Complete | _pending (next commit)_ |
 | Member management (invitations, role changes)                      | Planned  |                         |
 | Audit logs, reporting, dashboard                                   | Planned  |                         |
+
+## Invoices (completed 2026-09-28)
+
+**Scope:** draft invoices for a client of the organization, with line items
+editable only while the invoice is a draft. Issue (sequential per-organization
+number), mark paid, cancel. OVERDUE is derived from the due date. Totals,
+discount and tax are computed on the server in integer cents (BigInt, half-up
+rounding). PDF download and print view. List with search, status, client and
+sort filters; details page; the client page shows the client's invoices.
+Database CHECK constraints and triggers enforce total consistency, valid
+transitions and immutability of issued invoices. Design:
+[architecture.md §6d](architecture.md#6d-invoice-management).
+
+**Verification:**
+
+- **Unit tests:** 222/222, including 13 money-arithmetic tests (rounding,
+  exactness beyond 2^53, parsing, formatting) and the invoice components:
+  line-item editor, actions, form, table, toolbar, and nav permissions.
+- **Integration tests:** 296/296 against real PostgreSQL, 35 of them for
+  invoices:
+  - creation and client-supplied totals being ignored;
+  - line-item, tax and discount recalculation;
+  - valid and invalid transitions, and the derived overdue status;
+  - editing restrictions in the service and in the database triggers, and the
+    CHECK constraints;
+  - atomic rollback, concurrent item additions, a held-row-lock race, and
+    unique numbering under concurrent issuing;
+  - client ownership, the role matrix, cross-organization isolation, and
+    unauthenticated requests;
+  - the PDF (including non-Latin text), and organization deletion through the
+    triggers.
+- **Real browser (Chromium via Playwright, production build), 24/24:**
+  - create a draft through the form; add, edit and remove line items, with
+    displayed totals matching the database to the cent;
+  - invalid input rejected with a message;
+  - issue (INV-0001, editing locked), download the PDF, and the print layout;
+  - mark paid; an empty draft refused on issue, then cancelled;
+  - list filters, and the client page listing the client's invoices;
+  - a foreign invoice (page and PDF) returns 404;
+  - MEMBER: no nav item, access denied, and 403 on the PDF;
+  - no console or CSP errors.
+
+**Bugs found and fixed during verification:**
+
+- **Cancelling a draft failed:** the migration's `Invoice_issued_fields_check`
+  wrongly required issuing fields on every non-draft status. Fixed before
+  commit; covered by the DRAFT → CANCELLED test.
+- **Stale error on issued invoices:** the line-item editor kept an old
+  validation error after the invoice was issued, and it appeared in the print
+  view. Its temporary state now resets when the invoice becomes read-only, and
+  errors are hidden when printing. Regression test added.
+
+**Known follow-ups:**
+
+- Partial payments, refunds or credit notes, emailing invoices, and an invoice
+  activity history.
+- A default currency and tax rate per organization; currencies without 2
+  decimals (e.g. JPY) are not supported yet.
+- PDF fonts are limited to WinAnsi; non-Latin text shows as "?". Embedding a
+  Unicode font would fix it.
 
 ## Task management / Kanban (completed 2026-09-28)
 

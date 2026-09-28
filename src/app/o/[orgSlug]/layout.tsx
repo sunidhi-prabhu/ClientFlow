@@ -20,6 +20,7 @@ export default async function OrganizationLayout({
       organization={ctx.organization}
       organizations={organizations}
       user={{ name: session.user.name, email: session.user.email }}
+      role={ctx.role}
     >
       {children}
     </AppShell>

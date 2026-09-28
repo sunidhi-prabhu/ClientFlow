@@ -30,11 +30,13 @@ datasource db {
 
 /// The tenant. Root of every tenant-owned record.
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  /// Last invoice number issued in this organization (incremented atomically on issue).
+  invoiceSequence Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   memberships       Membership[]
   clients           Client[]
@@ -43,6 +45,8 @@ model Organization {
   projectMembers    ProjectMember[]
   projectActivities ProjectActivity[]
   tasks             Task[]
+  invoices          Invoice[]
+  invoiceItems      InvoiceItem[]
 }
 
 enum MembershipRole {
@@ -100,6 +104,7 @@ model Client {
   organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   projects     Project[]
   activities   ClientActivity[]
+  invoices     Invoice[]
 
   @@unique([organizationId, id])
   // Default list: an organization's clients by status, ordered by name / recency.
@@ -367,4 +372,79 @@ model Verification {
   updatedAt  DateTime @updatedAt
 
   @@index([identifier])
+}
+
+/// Persisted invoice states. OVERDUE is derived (ISSUED and past its due
+/// date) rather than stored, so it can never be stale; see docs/architecture.md.
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  CANCELLED
+}
+
+/// Tenant-owned invoice for one client of the same organization.
+/// Money is integer minor units (cents) in `currency`; rates are basis points.
+/// CHECK constraints and triggers (migration invoice_management) enforce total
+/// consistency and make everything except payment/cancellation immutable once
+/// the invoice is no longer a draft.
+model Invoice {
+  id             String        @id @default(cuid())
+  organizationId String
+  clientId       String
+  /// Sequential per organization, assigned on issue (drafts have none).
+  number         Int?
+  status         InvoiceStatus @default(DRAFT)
+  /// ISO 4217 code of a 2-decimal currency.
+  currency       String        @default("USD")
+  issueDate      DateTime?     @db.Date
+  dueDate        DateTime?     @db.Date
+  notes          String?
+  /// Invoice-level rates in basis points (1825 = 18.25%).
+  discountBps    Int           @default(0)
+  taxBps         Int           @default(0)
+  /// Computed on the server from the items: total = subtotal - discount + tax.
+  subtotalCents  Int           @default(0)
+  discountCents  Int           @default(0)
+  taxCents       Int           @default(0)
+  totalCents     Int           @default(0)
+  issuedAt       DateTime?
+  paidAt         DateTime?
+  cancelledAt    DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // Composite FK: the client must belong to the same organization.
+  client       Client        @relation(fields: [organizationId, clientId], references: [organizationId, id], onDelete: NoAction)
+  items        InvoiceItem[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, number])
+  // Invoice list: by status and due date (also serves the derived OVERDUE filter).
+  @@index([organizationId, status, dueDate])
+  @@index([organizationId, clientId])
+  @@index([organizationId, createdAt])
+}
+
+/// Tenant-owned line item of an invoice (same organization, composite FK).
+model InvoiceItem {
+  id             String   @id @default(cuid())
+  organizationId String
+  invoiceId      String
+  description    String
+  /// Quantity in thousandths (1500 = 1.5).
+  quantityMilli  Int
+  unitPriceCents Int
+  /// quantity × unit price, rounded half-up to the cent (server-computed).
+  amountCents    Int
+  position       Int
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invoice      Invoice      @relation(fields: [organizationId, invoiceId], references: [organizationId, id], onDelete: Cascade)
+
+  @@unique([organizationId, id])
+  @@index([organizationId, invoiceId, position])
 }
