@@ -42,6 +42,7 @@ model Organization {
   projects          Project[]
   projectMembers    ProjectMember[]
   projectActivities ProjectActivity[]
+  tasks             Task[]
 }
 
 enum MembershipRole {
@@ -178,6 +179,7 @@ model Project {
   client       Client?           @relation(fields: [organizationId, clientId], references: [organizationId, id], onDelete: NoAction)
   members      ProjectMember[]
   activities   ProjectActivity[]
+  tasks        Task[]
 
   @@unique([organizationId, id])
   @@index([organizationId, clientId])
@@ -197,9 +199,10 @@ model ProjectMember {
   userId         String
   createdAt      DateTime @default(now())
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  project      Project      @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
-  membership   Membership   @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project       Project      @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
+  membership    Membership   @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+  assignedTasks Task[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, projectId, userId])
@@ -214,6 +217,12 @@ enum ProjectActivityType {
   RESTORED
   MEMBER_ADDED
   MEMBER_REMOVED
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_STATUS_CHANGED
+  TASK_PRIORITY_CHANGED
+  TASK_ASSIGNMENT_CHANGED
+  TASK_DELETED
 }
 
 /// Tenant-owned, append-only history of one project (same pattern as
@@ -224,6 +233,9 @@ model ProjectActivity {
   projectId      String
   /// Who made the change; null if that user was later deleted.
   actorUserId    String?
+  /// Set for TASK_* events. Deliberately not a foreign key, so a task's
+  /// history (including TASK_DELETED) outlives the task.
+  taskId         String?
   type           ProjectActivityType
   /// UPDATED / STATUS_CHANGED: { field: { from, to } }.
   /// MEMBER_*: { member: { userId, name } } (name captured at the time).
@@ -236,6 +248,54 @@ model ProjectActivity {
 
   @@unique([organizationId, id])
   @@index([organizationId, projectId, createdAt])
+  @@index([organizationId, taskId, createdAt])
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  REVIEW
+  DONE
+}
+
+/// Declaration order is the sort order (LOW < … < URGENT).
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+/// Tenant-owned; belongs to exactly one project of the same organization and
+/// may be assigned to one member of that project.
+/// Trigger (migration task_management): removing someone from a project (or
+/// the organization) unassigns their tasks there.
+model Task {
+  id             String       @id @default(cuid())
+  organizationId String
+  projectId      String
+  title          String
+  description    String?
+  status         TaskStatus   @default(TODO)
+  priority       TaskPriority @default(MEDIUM)
+  dueDate        DateTime?    @db.Date
+  /// A member of this task's project (NULL = unassigned).
+  assigneeUserId String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // Composite FK: the project must be in the same organization.
+  project      Project        @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
+  // Composite FK: the assignee must be a member of this exact project.
+  // (MATCH SIMPLE: a NULL assignee is not checked.)
+  assignee     ProjectMember? @relation(fields: [organizationId, projectId, assigneeUserId], references: [organizationId, projectId, userId], onDelete: NoAction)
+
+  @@unique([organizationId, id])
+  // Kanban board: a project's tasks by column.
+  @@index([organizationId, projectId, status])
+  // Assignee FK lookups (e.g. when a project member is removed).
+  @@index([organizationId, projectId, assigneeUserId])
 }
 
 // ---------------------------------------------------------------------------

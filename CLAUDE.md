@@ -97,7 +97,13 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
   useListSearch, ProgressBar, SegmentError) and `escapeLikePattern` (`src/server/search.ts`) instead of copying them.
 - Cross-entity references (e.g. project → client, project member → membership) get a composite FK on
   `(organizationId, …)` **and** an explicit tenant-client lookup before the write (clear 404 / 409 messages).
-- Calendar dates (`@db.Date`) are UTC midnight: parse `YYYY-MM-DD` as UTC and format with `timeZone: "UTC"`.
+- Calendar dates (`@db.Date`) are UTC midnight: parse `YYYY-MM-DD` as UTC and format with `timeZone: "UTC"`
+  (`src/lib/calendar-date.ts`, `calendarDateField` in `src/lib/validation/dates.ts`).
+- Server Components can't pass functions to Client Components (only Server Actions): pass strings like a base path.
+- Raw SQL / triggers that write timestamps must use `now() AT TIME ZONE 'UTC'` (Prisma stores UTC wall-clock time;
+  the database server's time zone may differ).
+- Status changes that can race (e.g. Kanban moves) are compare-and-set: `updateMany({ where: { id, status: old } })`,
+  409 when nothing matched. Test races with a held row lock, not `Promise.all` (which rarely overlaps).
 - Navigation that looks like a button: `<Link className={buttonVariants()}>`, not `<Button render={<Link/>}>` (which
   gives the link `role="button"`).
 

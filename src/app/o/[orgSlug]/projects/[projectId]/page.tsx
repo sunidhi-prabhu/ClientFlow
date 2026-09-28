@@ -1,4 +1,4 @@
-import { ArrowLeft, CalendarDays, ListTodo, Pencil } from "lucide-react";
+import { ArrowLeft, CalendarDays, Pencil } from "lucide-react";
 import { type Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -10,6 +10,8 @@ import { ProjectMembers } from "@/components/projects/project-members";
 import { ProjectPriorityIndicator } from "@/components/projects/project-priority";
 import { ProjectQuickControls } from "@/components/projects/project-quick-controls";
 import { ProjectStatusBadge } from "@/components/projects/project-status-badge";
+import { KanbanBoard } from "@/components/tasks/kanban-board";
+import { TaskBoardToolbar } from "@/components/tasks/task-board-toolbar";
 import { ArchiveButton } from "@/components/shared/archive-button";
 import { ProgressBar } from "@/components/shared/progress-bar";
 import { buttonVariants } from "@/components/ui/button";
@@ -17,7 +19,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NotFoundError } from "@/lib/errors";
 import { hasPermission } from "@/lib/permissions";
 import { getProject, listAddableMembers, listProjectActivity } from "@/server/projects/service";
+import { parseTaskBoardQuery } from "@/lib/validation/task";
 import { tenantPage } from "@/server/protected";
+import { listProjectTasks } from "@/server/tasks/service";
 
 import {
   addProjectMemberAction,
@@ -27,11 +31,13 @@ import {
   setProjectProgressAction,
   setProjectStatusAction,
 } from "../actions";
+import { createTaskAction, moveTaskAction } from "./tasks/actions";
 
 export const metadata: Metadata = { title: "Project" };
 
 export default async function ProjectDetailsPage({
   params,
+  searchParams,
 }: PageProps<"/o/[orgSlug]/projects/[projectId]">) {
   const { orgSlug, projectId } = await params;
   const access = await tenantPage(orgSlug, "project:read");
@@ -49,10 +55,17 @@ export default async function ProjectDetailsPage({
   const archived = project.status === "ARCHIVED";
   const canUpdate = hasPermission(ctx.role, "project:update") && !archived;
   const canArchive = hasPermission(ctx.role, "project:delete");
-  const [activity, addable] = await Promise.all([
+  const canSeeTasks = hasPermission(ctx.role, "task:read");
+  const boardQuery = parseTaskBoardQuery(await searchParams);
+  const [activity, addable, board] = await Promise.all([
     listProjectActivity(db, project.id),
     canUpdate ? listAddableMembers(db, project.id) : Promise.resolve([]),
+    canSeeTasks ? listProjectTasks(db, project.id, boardQuery) : Promise.resolve(null),
   ]);
+  const projectMembers = project.members.map((member) => ({
+    userId: member.userId,
+    name: member.membership.user.name,
+  }));
   const overdue = isOverdue(project);
 
   return (
@@ -110,6 +123,45 @@ export default async function ProjectDetailsPage({
           </p>
         )}
       </div>
+
+      {board && (
+        <section aria-labelledby="tasks-heading" className="grid gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 id="tasks-heading" className="text-lg font-semibold tracking-tight">
+              Tasks
+            </h2>
+            {archived && <p className="text-sm text-muted-foreground">Read-only while archived.</p>}
+          </div>
+          <TaskBoardToolbar
+            q={boardQuery.q ?? ""}
+            assignee={boardQuery.assignee ?? ""}
+            priority={boardQuery.priority ?? ""}
+            members={projectMembers}
+          />
+          {board.truncated && (
+            <p className="text-sm text-muted-foreground">
+              Showing the first {board.tasks.length} tasks. Use the filters to narrow the board.
+            </p>
+          )}
+          <KanbanBoard
+            organizationSlug={slug}
+            projectId={project.id}
+            taskBasePath={`/o/${slug}/projects/${project.id}/tasks`}
+            tasks={board.tasks.map((task) => ({
+              id: task.id,
+              title: task.title,
+              status: task.status,
+              priority: task.priority,
+              dueDate: task.dueDate,
+              assigneeName: task.assignee?.membership.user.name ?? null,
+            }))}
+            canEdit={hasPermission(ctx.role, "task:update") && !archived}
+            canCreate={hasPermission(ctx.role, "task:create") && !archived}
+            moveAction={moveTaskAction}
+            createAction={createTaskAction}
+          />
+        </section>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="grid content-start gap-6 lg:col-span-2">
@@ -174,20 +226,6 @@ export default async function ProjectDetailsPage({
                 addAction={addProjectMemberAction}
                 removeAction={removeProjectMemberAction}
               />
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <ListTodo className="size-4" aria-hidden /> Tasks
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground">
-                Task management is not available yet. This project&apos;s tasks will be summarised
-                here.
-              </p>
             </CardContent>
           </Card>
         </div>

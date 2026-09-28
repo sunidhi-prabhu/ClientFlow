@@ -518,6 +518,91 @@ it covers only the list. A loading boundary above the details page would make
 `ActivityTimeline`, `EmptyState`, `ListPagination`, `ArchiveButton`,
 `ListSearchInput`/`useListSearch`, `ProgressBar` and `SegmentError`.
 
+## 6c. Task management (Kanban)
+
+**Model.** `Task`: title, description, `status` (TODO, IN_PROGRESS, REVIEW,
+DONE), `priority` (LOW … URGENT), optional `dueDate` (`DATE`), optional
+`assigneeUserId`, timestamps. Tasks are deleted (not archived). Their history
+survives in `ProjectActivity`.
+
+**Database guarantees** (migration `task_management`):
+
+- **Project:** `Task(organizationId, projectId) → Project(organizationId, id)`.
+  A task belongs to exactly one project of its own organization (cascade on
+  project delete).
+- **Assignee:**
+  `Task(organizationId, projectId, assigneeUserId) → ProjectMember(organizationId, projectId, userId)`.
+  An assignee must be a member of this exact project (and therefore of the
+  organization). NULL means unassigned (`MATCH SIMPLE`).
+- **Unassign trigger:** a composite FK cannot `SET NULL` only the assignee
+  column, so the FK is `NO ACTION`. A `BEFORE DELETE` trigger on
+  `ProjectMember` (`ProjectMember_unassign_tasks`) clears the assignee first.
+  Removing someone from a project, or from the organization (which cascades to
+  `ProjectMember`), unassigns their tasks there instead of failing.
+- **Indexes:** `(organizationId, projectId, status)` for the board,
+  `(organizationId, projectId, assigneeUserId)` for the assignee FK, and
+  `ProjectActivity (organizationId, taskId, createdAt)` for task history.
+
+**Activity.** Task events use the existing `ProjectActivity` table (no new
+audit mechanism): TASK_CREATED, TASK_UPDATED (title / due date / "description
+changed"), TASK_STATUS_CHANGED, TASK_PRIORITY_CHANGED,
+TASK_ASSIGNMENT_CHANGED, TASK_DELETED.
+
+- Each row carries `taskId` (deliberately not a foreign key, so history
+  outlives a deleted task) and the task title at the time.
+- Description text is never stored.
+- The project page's "Recent activity" still lists project-level events only
+  (`taskId IS NULL`). Task history is shown on each task's page.
+
+**Operations and permissions** (existing RBAC; no new permissions):
+
+| Operation                                                               | Permission    | Roles                 |
+| ----------------------------------------------------------------------- | ------------- | --------------------- |
+| View board and tasks                                                    | `task:read`   | all                   |
+| Create (quick-add per column)                                           | `task:create` | all                   |
+| Edit, move, assign / unassign, change priority / due date / description | `task:update` | all                   |
+| Delete                                                                  | `task:delete` | OWNER, ADMIN, MANAGER |
+
+**Current behaviour for MEMBER, kept unchanged and documented:** like
+`project:read`, task permissions are organization-wide. A MEMBER can create,
+edit and move tasks in **any** project of the organization, not only projects
+they belong to, but cannot delete tasks. Restricting MEMBERs to their own
+projects is a separate RBAC design decision (see follow-ups).
+
+**Tenant and project checks** (service `src/server/tasks/service.ts`, tenant
+client only):
+
+- **Existing tasks:** looked up by id through the tenant client. A foreign
+  task is `404 Task not found`, and the project is always read from the task,
+  never from input.
+- **Creation:** the `projectId` in the input is verified through the tenant
+  client (foreign or unknown → `404 Project not found`).
+- **Archived projects:** their tasks are read-only (409).
+- **Assignees:** checked against the task's project. A user who is unknown,
+  in another organization, or in the organization but not on the project all
+  get the same `422 "The assignee must be a member of this project"`. The
+  composite FK is the backstop.
+- **Task pages:** the page verifies that the task belongs to the project in
+  the URL (otherwise 404).
+
+**Kanban moves** are atomic compare-and-set:
+`UPDATE … WHERE id = ? AND status = <current>` in a transaction with the
+activity row. The client sends `fromStatus` (the column it saw). If the task
+was moved meanwhile, the pre-check or the conditional update fails and the
+action returns `409`. The board updates optimistically and rolls the card back
+on any rejection. An integration test holds a row lock from a second
+connection to prove the atomic path. Drag-and-drop uses `@dnd-kit/core`
+(pointer and keyboard sensors). Each card also has a "Move to" select as the
+accessible alternative. Cards are ordered within a column by priority, then
+due date; there is no manual reordering.
+
+**Board loading** takes 5 SQL statements regardless of task count: project
+check, tasks, then one batched query each for project members, memberships
+and users (asserted by a query-counting test). The board is capped at 500
+cards, with a notice to use the filters. Filters (search over title and
+description, assignee including "unassigned", priority) are URL parameters on
+the project page.
+
 ## 7. Error handling
 
 Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.

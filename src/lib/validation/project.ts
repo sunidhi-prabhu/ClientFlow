@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { calendarDateField } from "@/lib/validation/dates";
+
 /*
  * Project input and query schemas, shared by the server (authoritative) and
  * the forms. Unknown keys such as `organizationId` are stripped: the
@@ -10,12 +12,7 @@ import { z } from "zod";
 export const EDITABLE_PROJECT_STATUSES = ["PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED"] as const;
 export const PROJECT_PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"] as const;
 
-/** `YYYY-MM-DD` (from <input type="date">) → a UTC-midnight Date; blank → null. */
-const dateField = (label: string) =>
-  z
-    .union([z.literal(""), z.iso.date(`${label} must be a valid date`)])
-    .optional()
-    .transform((value) => (value ? new Date(`${value}T00:00:00.000Z`) : null));
+const dateField = calendarDateField;
 
 const projectFieldsObject = z.object({
   name: z.string().trim().min(1, "Enter a name").max(120, "Name must be at most 120 characters"),

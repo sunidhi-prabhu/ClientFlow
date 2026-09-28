@@ -23,7 +23,27 @@ const FIELD_LABELS: Record<string, string> = {
 
 type Changes = Record<string, { from?: unknown; to?: unknown }> & {
   member?: { name?: string };
+  task?: { title?: string };
+  assignee?: { from?: { name?: string } | null; to?: { name?: string } | null };
 };
+
+const TASK_STATUS_LABELS: Record<string, string> = {
+  TODO: "To do",
+  IN_PROGRESS: "In progress",
+  REVIEW: "Review",
+  DONE: "Done",
+};
+
+const PRIORITY_LABELS: Record<string, string> = {
+  LOW: "Low",
+  MEDIUM: "Medium",
+  HIGH: "High",
+  URGENT: "Urgent",
+};
+
+function label(labels: Record<string, string>, value: unknown) {
+  return typeof value === "string" ? (labels[value] ?? value) : "unknown";
+}
 
 function statusLabel(value: unknown) {
   return typeof value === "string" && value in PROJECT_STATUS_LABELS
@@ -31,8 +51,15 @@ function statusLabel(value: unknown) {
     : "unknown";
 }
 
+const TASK_FIELD_LABELS: Record<string, string> = {
+  title: "title",
+  dueDate: "due date",
+  description: "description",
+};
+
 function describe(item: ProjectActivityItem): string {
   const changes = (item.changes ?? {}) as Changes;
+  const task = changes.task?.title ?? "a task";
   switch (item.type) {
     case "CREATED":
       return "created this project";
@@ -46,6 +73,26 @@ function describe(item: ProjectActivityItem): string {
       return `added ${changes.member?.name ?? "a member"} to the project`;
     case "MEMBER_REMOVED":
       return `removed ${changes.member?.name ?? "a member"} from the project`;
+    case "TASK_CREATED":
+      return changes.assignee && "name" in changes.assignee
+        ? `created task “${task}” assigned to ${String(changes.assignee.name)}`
+        : `created task “${task}”`;
+    case "TASK_DELETED":
+      return `deleted task “${task}”`;
+    case "TASK_STATUS_CHANGED":
+      return `moved “${task}” from ${label(TASK_STATUS_LABELS, changes.status?.from)} to ${label(TASK_STATUS_LABELS, changes.status?.to)}`;
+    case "TASK_PRIORITY_CHANGED":
+      return `changed the priority of “${task}” from ${label(PRIORITY_LABELS, changes.priority?.from)} to ${label(PRIORITY_LABELS, changes.priority?.to)}`;
+    case "TASK_ASSIGNMENT_CHANGED":
+      return changes.assignee?.to
+        ? `assigned “${task}” to ${changes.assignee.to.name ?? "a member"}`
+        : `unassigned “${task}”`;
+    case "TASK_UPDATED": {
+      const fields = Object.keys(changes)
+        .filter((key) => key !== "task")
+        .map((field) => TASK_FIELD_LABELS[field] ?? field);
+      return `updated the ${fields.join(", ")} of “${task}”`;
+    }
     case "UPDATED": {
       if (Object.keys(changes).length === 1 && changes.progress) {
         return `set progress to ${String(changes.progress.to)}%`;

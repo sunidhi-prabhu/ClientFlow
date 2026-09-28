@@ -359,7 +359,8 @@ export async function listProjectActivity(db: TenantDb, projectId: string, limit
   const exists = await db.project.findUnique({ where: { id: projectId }, select: { id: true } });
   if (!exists) notFound();
   return db.projectActivity.findMany({
-    where: { projectId },
+    // Project-level events only; task events are shown on each task's page.
+    where: { projectId, taskId: null },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: limit,
     select: {

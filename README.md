@@ -6,8 +6,8 @@ organizations with role-based access.
 
 > **Status:** foundation, tenant isolation, authentication (email/password,
 > email verification, password reset, Google), organizations with roles, RBAC,
-> client management and project management are in place. Tasks, invoices and
-> reports are not implemented yet (see [Roadmap](#roadmap)).
+> client management, project management and task management (Kanban) are in
+> place. Invoices and reports are not implemented yet (see [Roadmap](#roadmap)).
 
 ## Tech stack
 
@@ -136,7 +136,7 @@ new-model checklist in [CLAUDE.md](CLAUDE.md).
 
 1. Member management (invitations, role changes, removal)
 2. ~~Client management~~ (done)
-3. ~~Projects~~ (done) and Kanban tasks
+3. ~~Projects and Kanban tasks~~ (done)
 4. Invoices
 5. Audit logs
 6. Reporting
