@@ -14,6 +14,8 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
 - `npm run test:integration`: real-PostgreSQL tests (needs `TEST_DATABASE_URL`, DB name must end in `_test`)
 - `npm run db:migrate -- --name <change>`: create/apply a migration after editing `prisma/schema.prisma`
 - `npm run db:generate`: regenerate the Prisma client (also runs on `npm install`)
+- Deployment, migrations, backups and monitoring: `docs/operations.md`. New env vars go in `.env.example`,
+  `src/lib/env.ts` and the table in `docs/operations.md`.
 
 ## Architecture rules
 
@@ -64,7 +66,7 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
   helpers: `getSession`, `getCurrentUser`, `requireSession` (throws 401), `requireSessionOrRedirect` (pages).
 - Protected entry points use the pipeline in `src/server/protected.ts`, never their own auth code:
   `tenantAction({ permission, input }, …)`, `tenantRoute(…)` (routes under `/api/o/[orgSlug]/…`),
-  `authenticatedAction` (signed in, no org). Pages use `getTenantContextForPage(orgSlug)`.
+  `authenticatedAction` (signed in, no org). Pages use `tenantPage(orgSlug, permission)` (built on `getTenantContextForPage`).
 - Handlers get `ctx` (userId, organization, membership, role; from session + DB) and `db` (tenant-scoped). Never
   read user id, organization id or role from input; the org slug in the URL is only a selector.
 - Permissions live in `src/lib/permissions.ts` (`<resource>:<action>`). Add new permissions there. Role changes
@@ -74,7 +76,7 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
   trigger is the backstop, not the check. To transfer ownership, promote the new owner first.
 - Better Auth endpoints: review before enabling new ones and record the decision in docs/architecture.md
   ("Account-management endpoints"). `/change-password` always revokes other sessions (hook in `auth.ts`).
-- Rate limiting is in-memory: single instance only until shared storage is configured (docs §12).
+- Rate limiting is stored in PostgreSQL (`RateLimit`, Better Auth `storage: "database"`): shared by all instances.
 - Never call `getAuth().api.*` from a request path (it skips Better Auth's rate limiter, origin check and
   `disabledPaths`): Server Actions use `callAuthEndpoint` (`src/server/auth/endpoint.ts`).
 - Production needs `AUTH_CLIENT_IP_HEADER` or `AUTH_TRUSTED_PROXIES`, a TLS `DATABASE_URL`, and the app connected as

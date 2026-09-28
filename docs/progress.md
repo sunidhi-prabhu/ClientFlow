@@ -13,11 +13,53 @@ Status of each milestone and how it was verified. Design details are in
 | Task management / Kanban                                           | Complete | `ae13b04`               |
 | Invoices                                                           | Complete | `09634fa`               |
 | Dashboard                                                          | Complete | `a6aa284`               |
-| Audit logging                                                      | Complete | _pending (next commit)_ |
-| Security audit and fixes                                           | Complete | _pending (next commit)_ |
-| UI polish, testing pass, performance audit and fixes               | Complete | _pending (next commit)_ |
+| Audit logging                                                      | Complete | `393f667`               |
+| Security audit and fixes                                           | Complete | `393f667`               |
+| UI polish, testing pass, performance audit and fixes               | Complete | `393f667`               |
+| Production readiness (application part; see operations.md)         | Complete | `393f667`               |
+| Final verification and documentation                               | Complete | _pending (next commit)_ |
 | Member management (invitations, role changes)                      | Planned  |                         |
-| Production readiness (application part; see operations.md)         | Complete | _pending (next commit)_ |
+
+## Final release verification (2026-09-28)
+
+**Clean state:** build output deleted; the development, test and benchmark
+databases were dropped and recreated.
+
+| Check                                           | Result                                                                                |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Migrations on an empty database                 | 10/10 applied, `migrate status` up to date, drift check clean, schema valid           |
+| `npm run check` (typecheck, lint, format, unit) | 347/347                                                                               |
+| Integration tests (real PostgreSQL)             | 405/405, on a freshly created test database and again on a warm one                   |
+| Production build                                | Passed. The server validates its configuration at startup; liveness and readiness 200 |
+
+**Real browser, production build, 181/181 checks:**
+
+| Script              | Checks | Covers                                                                                                         |
+| ------------------- | ------ | -------------------------------------------------------------------------------------------------------------- |
+| End-to-end journeys | 21     | Sign-up, organization, client, project, task and assignment, Kanban, dashboard, audit log, MEMBER restrictions |
+| Kanban              | 26     |                                                                                                                |
+| Invoices            | 24     | Create, issue, pay, cancel, PDF                                                                                |
+| Dashboard           | 28     |                                                                                                                |
+| Audit log           | 26     |                                                                                                                |
+| Capped audit log    | 6      |                                                                                                                |
+| Security            | 33     | Cross-organization access, forged IDs, unauthorized access, rate limits, XSS                                   |
+| Keyboard            | 14     |                                                                                                                |
+| Database outage     | 3      | Error page with reference, fast failure                                                                        |
+
+Also:
+
+- **Mobile and accessibility survey:** 68 screen/width combinations, with
+  no overflow and no axe violations.
+- **During the outage:** liveness 200, readiness 503; it recovered
+  afterwards.
+- All temporary services were stopped afterwards.
+
+**Bug found during final verification (test only):** three plan checks in
+`tests/integration/performance.test.ts` depended on table statistics, and
+failed on a freshly created test database. The check now runs `ANALYZE` and
+prefers plain index scans without explicit sorts, so it tests whether an
+index can serve the query and its order. Verified on fresh and warm
+databases.
 
 ## Production-readiness pass (completed 2026-09-28)
 

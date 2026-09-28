@@ -58,13 +58,16 @@ src/
     (auth)/               sign-in, sign-up, verify-email, forgot/reset password + auth actions
     (onboarding)/         create an organization
     o/[orgSlug]/          the application for one organization (AppShell)
-    api/                  Route handlers: health, webhooks, external/public API
+    api/                  Route handlers: auth (Better Auth), health (+ /live), invoice PDF
     error.tsx, global-error.tsx, not-found.tsx
   components/
     ui/                   shadcn/ui primitives (generated, then owned by us)
     layout/               Application frame: shell, navigation, logo
+    shared/               Reused pieces: empty state, pagination, timeline, progress, errors
+    <feature>/            clients/, projects/, tasks/, invoices/, dashboard/, audit/
   config/                 Static app configuration (navigation, etc.)
   proxy.ts                CSP nonce + optimistic sign-in redirect (not a security boundary)
+  instrumentation.ts      startup configuration check (exit on invalid) + server error logging
   lib/                    Framework-agnostic infrastructure
     permissions.ts        RBAC policy (pure; server-enforced, UI may read)
     security/headers.ts   security headers and CSP
@@ -80,14 +83,18 @@ src/
     email/                SMTP mailer, templates, deferred dispatch
     organizations/        organization bootstrap (org + OWNER membership)
     tenancy/              tenant client, tenant context, membership listing, scoping rules
-    <domain>/             e.g. clients/, projects/: service.ts, schemas.ts, *.test.ts
+    audit/                recordAudit (the only audit writer) and the audit log queries
+    startup.ts            configuration validation and request-error reporting
+    <domain>/             clients/, projects/, tasks/, invoices/, dashboard/: service.ts
+                          (input schemas live in src/lib/validation/<domain>.ts)
   generated/prisma/       Generated Prisma client (git-ignored; `npm run db:generate`)
 prisma/
   schema.prisma           Schema (tenancy rules in its header comment)
   migrations/             Committed SQL migrations
+db/runtime-role.sql       Least-privilege grants for the application's database role
 tests/                    Test setup, lint-boundary test
   integration/            Real-PostgreSQL tests + setup (create DB, migrate, truncate)
-docs/                     Architecture and design documents
+docs/                     Architecture, operations runbook (operations.md), progress log
 ```
 
 **Dependency direction:** `app → server → lib`. `components` may import `lib`
@@ -1037,3 +1044,24 @@ optionally, Google OAuth credentials.
 >
 > The full deployment, migration, rollback, backup and monitoring procedure is
 > in [operations.md](operations.md).
+
+## 13. Known limitations
+
+Implemented behavior is described above. These are deliberately **not**
+implemented yet (details and follow-ups per milestone in
+[progress.md](progress.md)):
+
+- **Member management UI:** no invitations, role-change or removal screens.
+  The service functions (`src/server/organizations/ownership.ts`) enforce the
+  rules and write audit records, but nothing calls them from a request yet.
+  An organization is created with its OWNER only.
+- **Settings:** no account screen (password, name, sessions) and no
+  organization settings or deletion screen.
+- **Operations:** browser checks are ad-hoc Playwright scripts, not CI. No
+  error-tracking service is integrated (the `onRequestError` hook logs JSON
+  and is where one would plug in). No audit-log retention policy.
+- **Scale:** list pagination (other than the audit log) uses `OFFSET`; project
+  search scans descriptions; the Kanban board reloads the page after each
+  move; the dashboard's task counts are linear in tasks (index-only).
+- **RBAC granularity:** MEMBER can work on tasks in any project of the
+  organization (`task:update` is organization-wide).

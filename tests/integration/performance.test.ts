@@ -263,7 +263,12 @@ describe("audit log count is capped", () => {
 });
 
 describe("the new indexes serve the generated SQL", () => {
-  /** Plan of the statement a service issues, with sequential scans disabled (tiny test data). */
+  /**
+   * Plan of the statement a service issues. The test tables are tiny and may
+   * have no statistics yet (fresh database), so the planner is steered to
+   * plain index scans: this checks whether an index *can* serve the query
+   * (and its order), independent of table size and ANALYZE state.
+   */
   async function planOf(
     run: (db: ReturnType<typeof createTenantDb>) => Promise<unknown>,
     match: RegExp,
@@ -273,8 +278,12 @@ describe("the new indexes serve the generated SQL", () => {
       await run(db);
       const statement = statements.find((s) => match.test(s.query));
       if (!statement) throw new Error(`no statement matching ${match}`);
+      await getDb().$executeRawUnsafe(`ANALYZE "AuditLog", "Invoice", "Project", "Client"`);
       const rows = await getDb().$transaction(async (tx) => {
         await tx.$executeRawUnsafe("SET LOCAL enable_seqscan = off");
+        await tx.$executeRawUnsafe("SET LOCAL enable_bitmapscan = off");
+        // Prefer an index that already yields the requested order over an explicit sort.
+        await tx.$executeRawUnsafe("SET LOCAL enable_sort = off");
         return tx.$queryRawUnsafe<{ "QUERY PLAN": string }[]>(
           `EXPLAIN ${statement.query}`,
           ...JSON.parse(statement.params),
