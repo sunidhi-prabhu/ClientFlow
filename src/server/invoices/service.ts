@@ -8,7 +8,7 @@ import {
   ReferenceNotFoundError,
   ValidationError,
 } from "@/lib/errors";
-import { todayUtc } from "@/lib/invoices";
+import { formatInvoiceNumber, invoiceDisplayStatus, todayUtc } from "@/lib/invoices";
 import { computeInvoiceTotals, lineAmountCents, MAX_AMOUNT_CENTS } from "@/lib/money";
 import {
   type InvoiceFields,
@@ -16,6 +16,7 @@ import {
   type ListInvoicesQuery,
   MAX_INVOICE_ITEMS,
 } from "@/lib/validation/invoice";
+import { recordAudit } from "@/server/audit/service";
 import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
@@ -135,7 +136,19 @@ export async function createInvoice(
         })),
       });
     }
-    return recalculate(tx, invoice.id);
+    const created = await recalculate(tx, invoice.id);
+    await recordAudit(tx, ctx, {
+      action: "invoice.created",
+      resourceId: created.id,
+      metadata: {
+        label: formatInvoiceNumber(created.number),
+        clientId: created.clientId,
+        currency: created.currency,
+        totalCents: created.totalCents,
+        itemCount: input.items.length,
+      },
+    });
+    return created;
   });
 }
 
@@ -240,50 +253,93 @@ export async function issueInvoice({ ctx, db }: Deps, id: string) {
       data: { invoiceSequence: { increment: 1 } },
       select: { invoiceSequence: true },
     });
-    return tx.invoice.update({
+    const issued = await tx.invoice.update({
       where: { id },
       data: { status: "ISSUED", number: invoiceSequence, issueDate: today, issuedAt: new Date() },
     });
+    await recordAudit(tx, ctx, {
+      action: "invoice.issued",
+      resourceId: id,
+      metadata: {
+        label: formatInvoiceNumber(issued.number),
+        status: { from: "DRAFT", to: "ISSUED" },
+        currency: issued.currency,
+        totalCents: issued.totalCents,
+        dueDate: issued.dueDate,
+      },
+    });
+    return issued;
   });
 }
 
-/** Atomic status change from one of `from` to `to`; 404/409 otherwise. */
+/**
+ * Atomic status change from one of `from` to `to`; 404/409 otherwise. The
+ * update is a compare-and-set on the status read in the same transaction, so
+ * the audit record names the exact previous status.
+ */
 async function transition(
-  db: TenantDb,
+  { ctx, db }: Deps,
   id: string,
   from: InvoiceStatus[],
   data: Prisma.InvoiceUpdateManyMutationInput & { status: InvoiceStatus },
+  action: "invoice.paid" | "invoice.cancelled",
   conflictMessage: (current: InvoiceStatus) => string,
 ) {
   return db.$transaction(async (tx) => {
-    const { count } = await tx.invoice.updateMany({ where: { id, status: { in: from } }, data });
+    const current =
+      (await tx.invoice.findUnique({
+        where: { id },
+        select: { status: true, dueDate: true },
+      })) ?? invoiceNotFound();
+    if (!from.includes(current.status)) throw new ConflictError(conflictMessage(current.status));
+    const { count } = await tx.invoice.updateMany({ where: { id, status: current.status }, data });
     if (count === 0) {
-      const current = await tx.invoice.findUnique({ where: { id }, select: { status: true } });
-      if (!current) invoiceNotFound();
-      throw new ConflictError(conflictMessage(current.status));
+      // Changed by someone else since it was read.
+      const latest = await tx.invoice.findUnique({ where: { id }, select: { status: true } });
+      if (!latest) invoiceNotFound();
+      throw new ConflictError(conflictMessage(latest.status));
     }
-    return tx.invoice.findUniqueOrThrow({ where: { id } });
+    const updated = await tx.invoice.findUniqueOrThrow({ where: { id } });
+    await recordAudit(tx, ctx, {
+      action,
+      resourceId: id,
+      metadata: {
+        label: formatInvoiceNumber(updated.number),
+        // OVERDUE is derived (issued and past due); recorded as it was displayed.
+        status: { from: invoiceDisplayStatus(current), to: updated.status },
+        currency: updated.currency,
+        totalCents: updated.totalCents,
+      },
+    });
+    return updated;
   });
 }
 
 /** Issued (including overdue) → paid. */
-export function markInvoicePaid({ db }: Deps, id: string) {
-  return transition(db, id, ["ISSUED"], { status: "PAID", paidAt: new Date() }, (current) =>
-    current === "PAID"
-      ? "This invoice is already paid"
-      : current === "DRAFT"
-        ? "Issue the invoice before marking it as paid"
-        : "Cancelled invoices cannot be marked as paid",
+export function markInvoicePaid(deps: Deps, id: string) {
+  return transition(
+    deps,
+    id,
+    ["ISSUED"],
+    { status: "PAID", paidAt: new Date() },
+    "invoice.paid",
+    (current) =>
+      current === "PAID"
+        ? "This invoice is already paid"
+        : current === "DRAFT"
+          ? "Issue the invoice before marking it as paid"
+          : "Cancelled invoices cannot be marked as paid",
   );
 }
 
 /** Draft or issued (including overdue) → cancelled. Paid invoices cannot be cancelled. */
-export function cancelInvoice({ db }: Deps, id: string) {
+export function cancelInvoice(deps: Deps, id: string) {
   return transition(
-    db,
+    deps,
     id,
     ["DRAFT", "ISSUED"],
     { status: "CANCELLED", cancelledAt: new Date() },
+    "invoice.cancelled",
     (current) =>
       current === "PAID"
         ? "Paid invoices cannot be cancelled"
@@ -325,8 +381,8 @@ function searchWhere(q: string | undefined): Prisma.InvoiceWhereInput {
   return {
     OR: [
       ...(number ? [{ number: Number(number) }] : []),
-      { client: { name: term } },
-      { client: { company: term } },
+      // One relation filter (one join), not one per client column.
+      { client: { OR: [{ name: term }, { company: term }] } },
     ],
   };
 }
@@ -348,11 +404,25 @@ export async function listInvoices(db: TenantDb, query: ListInvoicesQuery, now =
   };
   const where: Prisma.InvoiceWhereInput = { AND: [base, statusWhere(query.status, today)] };
 
-  const [total, groups, overdue] = await Promise.all([
-    db.invoice.count({ where }),
+  // Per-status counts (OVERDUE derived) also give the total: no separate COUNT.
+  const [groups, overdue] = await Promise.all([
     db.invoice.groupBy({ by: ["status"], _count: { _all: true }, where: base }),
     db.invoice.count({ where: { AND: [base, statusWhere("OVERDUE", today)] } }),
   ]);
+  const byStatus = Object.fromEntries(groups.map((g) => [g.status, g._count._all])) as Partial<
+    Record<InvoiceStatus, number>
+  >;
+  const statusCounts = {
+    DRAFT: byStatus.DRAFT ?? 0,
+    ISSUED: (byStatus.ISSUED ?? 0) - overdue,
+    OVERDUE: overdue,
+    PAID: byStatus.PAID ?? 0,
+    CANCELLED: byStatus.CANCELLED ?? 0,
+  };
+  const total =
+    query.status === "all"
+      ? Object.values(statusCounts).reduce((sum, count) => sum + count, 0)
+      : statusCounts[query.status];
 
   const pageCount = Math.max(1, Math.ceil(total / query.pageSize));
   const page = Math.min(query.page, pageCount);
@@ -374,18 +444,27 @@ export async function listInvoices(db: TenantDb, query: ListInvoicesQuery, now =
     },
   });
 
-  const byStatus = Object.fromEntries(groups.map((g) => [g.status, g._count._all])) as Partial<
-    Record<InvoiceStatus, number>
-  >;
-  const statusCounts = {
-    DRAFT: byStatus.DRAFT ?? 0,
-    ISSUED: (byStatus.ISSUED ?? 0) - overdue,
-    OVERDUE: overdue,
-    PAID: byStatus.PAID ?? 0,
-    CANCELLED: byStatus.CANCELLED ?? 0,
-  };
-
   return { items, total, page, pageSize: query.pageSize, pageCount, statusCounts };
+}
+
+/**
+ * A client's most recent invoices (newest first, like the list's default), for
+ * the client page. A plain query: the list's counts and filters are not needed.
+ */
+export function listClientInvoices(db: TenantDb, clientId: string, limit = 5) {
+  return db.invoice.findMany({
+    where: { clientId },
+    orderBy: ORDER_BY.newest,
+    take: limit,
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      currency: true,
+      dueDate: true,
+      totalCents: true,
+    },
+  });
 }
 
 /** Clients that can be invoiced (active or inactive; plus the current one). */

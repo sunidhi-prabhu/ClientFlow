@@ -2,7 +2,7 @@
 
 import { Ban, CheckCircle2, Printer, Send } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { type ActionResult } from "@/lib/errors";
@@ -62,6 +62,21 @@ export function InvoiceActions({
   const [confirming, setConfirming] = useState<Kind | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const triggers = useRef(new Map<Kind, HTMLButtonElement>());
+  const confirm = useRef<HTMLButtonElement>(null);
+  const lastConfirmed = useRef<Kind | null>(null);
+
+  // Keyboard focus follows the confirmation step: to the confirm button when
+  // it appears, back to the action that opened it when the user steps back.
+  useEffect(() => {
+    if (confirming) {
+      lastConfirmed.current = confirming;
+      confirm.current?.focus();
+    } else if (lastConfirmed.current) {
+      triggers.current.get(lastConfirmed.current)?.focus();
+      lastConfirmed.current = null;
+    }
+  }, [confirming]);
 
   function run(kind: Kind) {
     setError(null);
@@ -85,14 +100,15 @@ export function InvoiceActions({
   }
 
   return (
-    <div className="flex flex-col items-end gap-2 print:hidden">
-      <div className="flex flex-wrap justify-end gap-2">
+    <div className="flex flex-col items-start gap-2 sm:items-end print:hidden">
+      <div className="flex flex-wrap gap-2 sm:justify-end">
         {confirming ? (
           <>
             <Button variant="ghost" disabled={pending} onClick={() => setConfirming(null)}>
               Back
             </Button>
             <Button
+              ref={confirm}
               variant={COPY[confirming].variant}
               disabled={pending}
               onClick={() => run(confirming)}
@@ -113,6 +129,10 @@ export function InvoiceActions({
                 return (
                   <Button
                     key={kind}
+                    ref={(element) => {
+                      if (element) triggers.current.set(kind, element);
+                      else triggers.current.delete(kind);
+                    }}
                     variant={kind === "cancel" ? "outline" : COPY[kind].variant}
                     onClick={() => setConfirming(kind)}
                   >
@@ -125,7 +145,7 @@ export function InvoiceActions({
         )}
       </div>
       {error && (
-        <p role="alert" className="max-w-md text-right text-sm text-destructive">
+        <p role="alert" className="max-w-md text-sm text-destructive sm:text-right">
           {error}
         </p>
       )}

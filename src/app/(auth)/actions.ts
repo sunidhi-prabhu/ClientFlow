@@ -1,19 +1,20 @@
 "use server";
 
-import { headers } from "next/headers";
 import { redirect, unstable_rethrow } from "next/navigation";
 import { z } from "zod";
 
 import { toActionError } from "@/lib/api/handle-error";
 import { type ActionResult } from "@/lib/errors";
-import { getAuth } from "@/server/auth/auth";
+import { callAuthEndpoint } from "@/server/auth/endpoint";
 import { fromAuthError } from "@/server/auth/errors";
 
 /*
- * Authentication Server Actions. Each validates its input, calls Better Auth's
- * server API (the `nextCookies` plugin sets/clears the session cookie), and
- * returns an ActionResult on failure or redirects on success. Responses never
- * reveal whether an email address is registered.
+ * Authentication Server Actions. Each validates its input, calls the Better
+ * Auth endpoint through its HTTP handler (callAuthEndpoint: rate limiting,
+ * origin check and disabled paths apply exactly as for /api/auth/*; cookies
+ * are copied to the response), and returns an ActionResult on failure or
+ * redirects on success. Responses never reveal whether an email address is
+ * registered.
  */
 
 const email = z.email("Enter a valid email address").trim().toLowerCase();
@@ -47,7 +48,7 @@ export async function signUpAction(input: unknown) {
   const failure = await run(async () => {
     const body = signUpInput.parse(input);
     address = body.email;
-    await getAuth().api.signUpEmail({ body, headers: await headers() });
+    await callAuthEndpoint("/sign-up/email", body);
   });
   if (failure) return failure;
   // Same destination whether or not the address was already registered.
@@ -59,7 +60,7 @@ const signInInput = z.object({ email, password: z.string().min(1, "Enter your pa
 export async function signInAction(input: unknown) {
   const failure = await run(async () => {
     const body = signInInput.parse(input);
-    await getAuth().api.signInEmail({ body, headers: await headers() });
+    await callAuthEndpoint("/sign-in/email", body);
   });
   if (failure) return failure;
   redirect("/");
@@ -77,7 +78,7 @@ export async function verifyEmailAction(input: unknown) {
   const failure = await run(async () => {
     const body = verifyEmailInput.parse(input);
     // Signs the user in on success (autoSignInAfterVerification).
-    await getAuth().api.verifyEmailOTP({ body, headers: await headers() });
+    await callAuthEndpoint("/email-otp/verify-email", body);
   });
   if (failure) return failure;
   redirect("/");
@@ -87,9 +88,9 @@ export async function resendVerificationCodeAction(input: unknown) {
   return (
     (await run(async () => {
       const body = z.object({ email }).parse(input);
-      await getAuth().api.sendVerificationOTP({
-        body: { email: body.email, type: "email-verification" },
-        headers: await headers(),
+      await callAuthEndpoint("/email-otp/send-verification-otp", {
+        email: body.email,
+        type: "email-verification",
       });
     })) ?? ({ ok: true, data: undefined } as const)
   );
@@ -99,9 +100,9 @@ export async function requestPasswordResetAction(input: unknown) {
   return (
     (await run(async () => {
       const body = z.object({ email }).parse(input);
-      await getAuth().api.requestPasswordReset({
-        body: { email: body.email, redirectTo: "/reset-password" },
-        headers: await headers(),
+      await callAuthEndpoint("/request-password-reset", {
+        email: body.email,
+        redirectTo: "/reset-password",
       });
     })) ?? ({ ok: true, data: undefined } as const)
   );
@@ -113,7 +114,7 @@ export async function resetPasswordAction(input: unknown) {
   const failure = await run(async () => {
     const body = resetPasswordInput.parse(input);
     // Also signs out every existing session (revokeSessionsOnPasswordReset).
-    await getAuth().api.resetPassword({ body, headers: await headers() });
+    await callAuthEndpoint("/reset-password", body);
   });
   if (failure) return failure;
   redirect("/sign-in?reset=1");
@@ -122,11 +123,11 @@ export async function resetPasswordAction(input: unknown) {
 export async function signInWithGoogleAction() {
   let url: string | undefined;
   const failure = await run(async () => {
-    const result = await getAuth().api.signInSocial({
-      body: { provider: "google", callbackURL: "/" },
-      headers: await headers(),
+    const result = await callAuthEndpoint<{ url?: string }>("/sign-in/social", {
+      provider: "google",
+      callbackURL: "/",
     });
-    url = result.url;
+    url = result?.url;
   });
   if (failure) return failure;
   if (!url) return toActionError(new Error("Google sign-in did not return a redirect URL"));
@@ -135,7 +136,7 @@ export async function signInWithGoogleAction() {
 
 export async function signOutAction() {
   await run(async () => {
-    await getAuth().api.signOut({ headers: await headers() });
+    await callAuthEndpoint("/sign-out", {});
   });
   redirect("/sign-in");
 }

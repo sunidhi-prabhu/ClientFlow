@@ -2,7 +2,7 @@
 
 import { Archive, ArchiveRestore } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
 import { type ActionResult } from "@/lib/errors";
@@ -33,6 +33,17 @@ export function ArchiveButton({
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const confirm = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
+
+  // Keyboard focus follows the two-step flow: to "Confirm" when it appears,
+  // back to "Archive" when the user steps back (instead of being lost).
+  useEffect(() => {
+    if (confirming) confirm.current?.focus();
+    else if (wasConfirming.current) trigger.current?.focus();
+    wasConfirming.current = confirming;
+  }, [confirming]);
 
   function run(action: ArchiveAction) {
     setError(null);
@@ -59,12 +70,17 @@ export function ArchiveButton({
           <Button variant="ghost" disabled={pending} onClick={() => setConfirming(false)}>
             Cancel
           </Button>
-          <Button variant="destructive" disabled={pending} onClick={() => run(archiveAction)}>
+          <Button
+            ref={confirm}
+            variant="destructive"
+            disabled={pending}
+            onClick={() => run(archiveAction)}
+          >
             {pending ? "Archiving…" : "Confirm archive"}
           </Button>
         </div>
       ) : (
-        <Button variant="outline" onClick={() => setConfirming(true)}>
+        <Button ref={trigger} variant="outline" onClick={() => setConfirming(true)}>
           <Archive aria-hidden />
           Archive
         </Button>

@@ -5,7 +5,11 @@ import { errorResponse, toAppError } from "@/lib/api/handle-error";
 import { getDb } from "@/lib/db";
 import { OwnerRequiredError } from "@/lib/errors";
 import { createOrganization } from "@/server/organizations/bootstrap";
-import { changeMembershipRole, removeMembership } from "@/server/organizations/ownership";
+import {
+  changeMembershipRole,
+  removeMembership,
+  SYSTEM_ACTOR,
+} from "@/server/organizations/ownership";
 import { getTenantDb, type TenantDb } from "@/server/tenancy";
 
 import { createVerifiedUser } from "./support/auth";
@@ -51,7 +55,9 @@ beforeEach(async () => {
 describe("last OWNER protection (application check)", () => {
   it("refuses to remove the last OWNER with 409", async () => {
     await addMember("admin@example.com", "ADMIN");
-    const error = await removeMembership(db, owner.membershipId).catch((caught: unknown) => caught);
+    const error = await removeMembership(db, owner.membershipId, SYSTEM_ACTOR).catch(
+      (caught: unknown) => caught,
+    );
 
     expect(error).toBeInstanceOf(OwnerRequiredError);
     const response = errorResponse(error);
@@ -63,7 +69,7 @@ describe("last OWNER protection (application check)", () => {
   it.each(["ADMIN", "MANAGER", "MEMBER"] as const)(
     "refuses to demote the last OWNER to %s with 409",
     async (role) => {
-      const error = await changeMembershipRole(db, owner.membershipId, role).catch(
+      const error = await changeMembershipRole(db, owner.membershipId, role, SYSTEM_ACTOR).catch(
         (caught: unknown) => caught,
       );
       expect(error).toBeInstanceOf(OwnerRequiredError);
@@ -75,13 +81,15 @@ describe("last OWNER protection (application check)", () => {
   it("allows demoting or removing an OWNER while another OWNER exists", async () => {
     const second = await addMember("second-owner@example.com", "OWNER");
 
-    await expect(changeMembershipRole(db, owner.membershipId, "ADMIN")).resolves.toMatchObject({
+    await expect(
+      changeMembershipRole(db, owner.membershipId, "ADMIN", SYSTEM_ACTOR),
+    ).resolves.toMatchObject({
       role: "ADMIN",
     });
     expect(await roles()).toEqual(["ADMIN", "OWNER"]);
 
     // Now `second` is the only owner and is protected in turn.
-    await expect(removeMembership(db, second.membershipId)).rejects.toBeInstanceOf(
+    await expect(removeMembership(db, second.membershipId, SYSTEM_ACTOR)).rejects.toBeInstanceOf(
       OwnerRequiredError,
     );
   });
@@ -89,20 +97,22 @@ describe("last OWNER protection (application check)", () => {
   it("transfers ownership: promote the new owner, then demote or remove the old one", async () => {
     const successor = await addMember("successor@example.com", "ADMIN");
 
-    await changeMembershipRole(db, successor.membershipId, "OWNER");
-    await changeMembershipRole(db, owner.membershipId, "MEMBER");
+    await changeMembershipRole(db, successor.membershipId, "OWNER", SYSTEM_ACTOR);
+    await changeMembershipRole(db, owner.membershipId, "MEMBER", SYSTEM_ACTOR);
     expect(await roles()).toEqual(["MEMBER", "OWNER"]);
 
-    await removeMembership(db, owner.membershipId);
+    await removeMembership(db, owner.membershipId, SYSTEM_ACTOR);
     expect(await roles()).toEqual(["OWNER"]);
   });
 
   it("does not restrict changes to non-owners", async () => {
     const member = await addMember("member@example.com", "MEMBER");
-    await expect(changeMembershipRole(db, member.membershipId, "MANAGER")).resolves.toMatchObject({
+    await expect(
+      changeMembershipRole(db, member.membershipId, "MANAGER", SYSTEM_ACTOR),
+    ).resolves.toMatchObject({
       role: "MANAGER",
     });
-    await expect(removeMembership(db, member.membershipId)).resolves.toMatchObject({
+    await expect(removeMembership(db, member.membershipId, SYSTEM_ACTOR)).resolves.toMatchObject({
       id: member.membershipId,
     });
     expect(await roles()).toEqual(["OWNER"]);
@@ -115,7 +125,9 @@ describe("last OWNER protection (application check)", () => {
       where: { organizationId: globex.id },
     });
 
-    const error = await removeMembership(db, foreignOwner.id).catch((caught: unknown) => caught);
+    const error = await removeMembership(db, foreignOwner.id, SYSTEM_ACTOR).catch(
+      (caught: unknown) => caught,
+    );
     expect(toAppError(error)).toMatchObject({ status: 404, code: "NOT_FOUND" });
     await expect(getDb().membership.count({ where: { organizationId: globex.id } })).resolves.toBe(
       1,
@@ -152,8 +164,8 @@ describe("database trigger backstop maps to 409", () => {
     const second = await addMember("second-owner@example.com", "OWNER");
 
     const results = await Promise.allSettled([
-      changeMembershipRole(db, owner.membershipId, "ADMIN"),
-      changeMembershipRole(getTenantDb(acme.id), second.membershipId, "ADMIN"),
+      changeMembershipRole(db, owner.membershipId, "ADMIN", SYSTEM_ACTOR),
+      changeMembershipRole(getTenantDb(acme.id), second.membershipId, "ADMIN", SYSTEM_ACTOR),
     ]);
 
     const failures = results.filter((result) => result.status === "rejected");

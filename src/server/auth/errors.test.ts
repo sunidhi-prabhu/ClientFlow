@@ -36,3 +36,20 @@ describe("fromAuthError", () => {
     expect(fromAuthError(serverError)).toBe(serverError);
   });
 });
+
+describe("fromAuthError with handler responses", () => {
+  it("maps AuthEndpointError like Better Auth's APIError", async () => {
+    const { AuthEndpointError } = await import("@/server/auth/errors");
+    expect(
+      fromAuthError(new AuthEndpointError(429, { message: "Too many requests" })),
+    ).toMatchObject({ code: "RATE_LIMITED", status: 429 });
+    expect(
+      fromAuthError(
+        new AuthEndpointError(401, {
+          code: "INVALID_EMAIL_OR_PASSWORD",
+          message: "Invalid email or password",
+        }),
+      ),
+    ).toMatchObject({ code: "UNAUTHENTICATED", message: "Invalid email or password" });
+  });
+});

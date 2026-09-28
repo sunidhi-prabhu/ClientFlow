@@ -43,6 +43,8 @@ export const PERMISSIONS = [
   "invoice:send",
   // Reports
   "report:read",
+  // Audit log (security-sensitive: sign-ins, role changes, …). OWNER and ADMIN only.
+  "audit:read",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
@@ -138,5 +140,29 @@ export function canChangeRole(input: {
 export function assertCanChangeRole(input: Parameters<typeof canChangeRole>[0]): void {
   if (!canChangeRole(input)) {
     throw new ForbiddenError("You cannot assign this role");
+  }
+}
+
+/**
+ * Member-removal rules (mirror the role-change rules): requires
+ * `member:remove`; nobody removes themselves through this path; an OWNER may
+ * remove anyone, everyone else only members ranked below them. "At least one
+ * OWNER" is additionally enforced by the service and the database.
+ */
+export function canRemoveMember(input: {
+  actorRole: Role;
+  actorIsTarget: boolean;
+  targetRole: Role;
+}): boolean {
+  const { actorRole, actorIsTarget, targetRole } = input;
+  if (!hasPermission(actorRole, "member:remove")) return false;
+  if (actorIsTarget) return false;
+  if (actorRole === "OWNER") return true;
+  return ROLE_RANK[targetRole] < ROLE_RANK[actorRole];
+}
+
+export function assertCanRemoveMember(input: Parameters<typeof canRemoveMember>[0]): void {
+  if (!canRemoveMember(input)) {
+    throw new ForbiddenError("You cannot remove this member");
   }
 }

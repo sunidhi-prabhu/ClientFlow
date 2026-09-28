@@ -37,12 +37,15 @@ export function ListPagination({
   pageSize,
   total,
   hrefForPage,
+  totalLabel,
 }: {
   page: number;
   pageCount: number;
   pageSize: number;
   total: number;
   hrefForPage: (page: number) => string;
+  /** Shown instead of `total` (e.g. "10,000+" when counting stopped at a limit). */
+  totalLabel?: string;
 }) {
   if (total === 0) return null;
   const from = (page - 1) * pageSize + 1;
@@ -53,7 +56,7 @@ export function ListPagination({
       <p className="text-sm text-muted-foreground">
         Showing <span className="font-medium text-foreground">{from}</span>–
         <span className="font-medium text-foreground">{to}</span> of{" "}
-        <span className="font-medium text-foreground">{total}</span>
+        <span className="font-medium text-foreground">{totalLabel ?? total}</span>
       </p>
       {pageCount > 1 && (
         <div className="flex items-center gap-2">

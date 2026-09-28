@@ -3,6 +3,7 @@ import "server-only";
 import { type ClientStatus } from "@/generated/prisma/enums";
 import { ConflictError, NotFoundError } from "@/lib/errors";
 import { type ClientFields, type ListClientsQuery } from "@/lib/validation/client";
+import { recordAudit } from "@/server/audit/service";
 import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
@@ -60,6 +61,11 @@ export async function createClient({ ctx, db }: Deps, input: ClientFields) {
         type: "CREATED",
       },
     });
+    await recordAudit(tx, ctx, {
+      action: "client.created",
+      resourceId: client.id,
+      metadata: { name: client.name, status: client.status },
+    });
     return client;
   });
 }
@@ -81,7 +87,13 @@ export async function updateClient({ ctx, db }: Deps, id: string, input: ClientF
     if (existing.notes !== input.notes) changes.notes = { from: null, to: null };
     if (Object.keys(changes).length === 0) return existing;
 
-    const client = await tx.client.update({ where: { id }, data: input });
+    // Compare-and-set: an archive committed meanwhile makes the client read-only.
+    const { count } = await tx.client.updateMany({
+      where: { id, status: { not: "ARCHIVED" } },
+      data: input,
+    });
+    if (count === 0) throw new ConflictError("Restore this client before editing it");
+    const client = await tx.client.findUniqueOrThrow({ where: { id } });
     await tx.clientActivity.create({
       data: {
         organizationId: ctx.organization.id,
@@ -90,6 +102,11 @@ export async function updateClient({ ctx, db }: Deps, id: string, input: ClientF
         type: "UPDATED",
         changes,
       },
+    });
+    await recordAudit(tx, ctx, {
+      action: "client.updated",
+      resourceId: id,
+      metadata: { name: client.name, changes },
     });
     return client;
   });
@@ -103,10 +120,17 @@ async function setArchived({ ctx, db }: Deps, id: string, archive: boolean) {
     if (!archive && !isArchived) throw new ConflictError("This client is not archived");
 
     const status: ClientStatus = archive ? "ARCHIVED" : "ACTIVE";
-    const client = await tx.client.update({
-      where: { id },
+    // Compare-and-set on the status just read: a concurrent archive/restore wins, this one is a 409.
+    const { count } = await tx.client.updateMany({
+      where: { id, status: existing.status },
       data: { status, archivedAt: archive ? new Date() : null },
     });
+    if (count === 0) {
+      throw new ConflictError(
+        archive ? "This client is already archived" : "This client is not archived",
+      );
+    }
+    const client = await tx.client.findUniqueOrThrow({ where: { id } });
     await tx.clientActivity.create({
       data: {
         organizationId: ctx.organization.id,
@@ -115,6 +139,11 @@ async function setArchived({ ctx, db }: Deps, id: string, archive: boolean) {
         type: archive ? "ARCHIVED" : "RESTORED",
         changes: { status: { from: existing.status, to: status } },
       },
+    });
+    await recordAudit(tx, ctx, {
+      action: archive ? "client.archived" : "client.restored",
+      resourceId: id,
+      metadata: { name: client.name, status: { from: existing.status, to: status } },
     });
     return client;
   });
@@ -166,10 +195,20 @@ export type ClientListResult = Awaited<ReturnType<typeof listClients>>;
 export async function listClients(db: TenantDb, query: ListClientsQuery) {
   const where = { AND: [statusWhere(query.status), searchWhere(query.q)] };
 
-  const [total, statusGroups] = await Promise.all([
-    db.client.count({ where }),
-    db.client.groupBy({ by: ["status"], _count: { _all: true }, where: searchWhere(query.q) }),
-  ]);
+  // One aggregate for both the per-status counts and the total (no separate COUNT).
+  const statusGroups = await db.client.groupBy({
+    by: ["status"],
+    _count: { _all: true },
+    where: searchWhere(query.q),
+  });
+  const statusCounts: Record<ClientStatus, number> = { ACTIVE: 0, INACTIVE: 0, ARCHIVED: 0 };
+  for (const group of statusGroups) statusCounts[group.status] = group._count._all;
+  const total =
+    query.status === "all"
+      ? statusCounts.ACTIVE + statusCounts.INACTIVE + statusCounts.ARCHIVED
+      : query.status === "current"
+        ? statusCounts.ACTIVE + statusCounts.INACTIVE
+        : statusCounts[query.status];
 
   const pageCount = Math.max(1, Math.ceil(total / query.pageSize));
   const page = Math.min(query.page, pageCount);
@@ -181,15 +220,13 @@ export async function listClients(db: TenantDb, query: ListClientsQuery) {
     take: query.pageSize,
   });
 
-  const statusCounts: Record<ClientStatus, number> = { ACTIVE: 0, INACTIVE: 0, ARCHIVED: 0 };
-  for (const group of statusGroups) statusCounts[group.status] = group._count._all;
-
   return { items, total, page, pageSize: query.pageSize, pageCount, statusCounts };
 }
 
 /** Most recent first. 404 if the client is not in this organization. */
 export async function listClientActivity(db: TenantDb, clientId: string, limit = 20) {
-  await getClient(db, clientId);
+  const client = await db.client.findUnique({ where: { id: clientId }, select: { id: true } });
+  if (!client) notFound();
   return db.clientActivity.findMany({
     where: { clientId },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],

@@ -47,6 +47,7 @@ model Organization {
   tasks             Task[]
   invoices          Invoice[]
   invoiceItems      InvoiceItem[]
+  auditLogs         AuditLog[]
 }
 
 enum MembershipRole {
@@ -110,6 +111,11 @@ model Client {
   // Default list: an organization's clients by status, ordered by name / recency.
   @@index([organizationId, status, name])
   @@index([organizationId, updatedAt])
+  // Search: case-insensitive substring match (ILIKE '%…%') on name, company or
+  // email without scanning every client (pg_trgm GIN; the extension is created
+  // in migration performance_indexes). A GIN index cannot lead with
+  // organizationId in a form Prisma understands; queries still filter by it.
+  @@index([name(ops: raw("gin_trgm_ops")), company(ops: raw("gin_trgm_ops")), email(ops: raw("gin_trgm_ops"))], type: Gin)
 }
 
 enum ClientActivityType {
@@ -193,6 +199,8 @@ model Project {
   // Default list: an organization's projects by status, ordered by name / recency.
   @@index([organizationId, status, name])
   @@index([organizationId, updatedAt])
+  // Dashboard: active projects due soonest (top N straight from the index).
+  @@index([organizationId, status, dueDate])
 }
 
 /// Tenant-owned: a person working on a project. References the organization
@@ -325,6 +333,7 @@ model User {
   memberships       Membership[]
   clientActivities  ClientActivity[]
   projectActivities ProjectActivity[]
+  auditLogs         AuditLog[]
 }
 
 model Session {
@@ -429,6 +438,11 @@ model Invoice {
   @@index([organizationId, status, dueDate])
   @@index([organizationId, clientId])
   @@index([organizationId, createdAt])
+  // Dashboard totals: count and sum per status and currency from the index alone.
+  @@index([organizationId, status, currency, totalCents])
+  // List sorts by amount (largest first) and by due date.
+  @@index([organizationId, totalCents(sort: Desc), id])
+  @@index([organizationId, dueDate, id])
 }
 
 /// Tenant-owned line item of an invoice (same organization, composite FK).
@@ -451,4 +465,49 @@ model InvoiceItem {
 
   @@unique([organizationId, id])
   @@index([organizationId, invoiceId, position])
+}
+
+/// Append-only security and business audit trail of one organization.
+/// Written only by the server (src/server/audit, src/server/auth/audit.ts) in
+/// the same transaction as the change it records; never through a request
+/// that names its own actor or organization. A trigger (migration
+/// audit_logging) rejects UPDATE and DELETE except organization/user cascades,
+/// and the tenant client refuses to update or delete it.
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  /// The authenticated user who acted; null for anonymous events (e.g. a
+  /// failed sign-in) or once that user is deleted.
+  actorUserId    String?
+  /// `<resource>.<verb>`, e.g. `client.created` (see src/lib/audit.ts).
+  action         String
+  /// user, organization, membership, client, project, task or invoice.
+  resourceType   String
+  resourceId     String?
+  /// Sanitized context (names, changed fields, from/to values). Never secrets.
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, id])
+  // Audit log page: newest first, optionally filtered by actor, action or resource type.
+  // Newest first with a stable tie-break (createdAt DESC, id DESC = backward scan).
+  @@index([organizationId, createdAt, id])
+  @@index([organizationId, actorUserId, createdAt])
+  @@index([organizationId, action, createdAt])
+  @@index([organizationId, resourceType, createdAt])
+}
+
+/// Better Auth rate-limit counters (`rateLimit.storage: "database"`), shared by
+/// every application instance so limits hold when scaled out or restarted.
+/// Keyed by client IP and endpoint; Better Auth prunes expired rows. Global:
+/// not organization-owned and never reachable through the tenant client.
+model RateLimit {
+  id          String @id
+  key         String @unique
+  count       Int
+  /// Milliseconds since the epoch.
+  lastRequest BigInt
 }

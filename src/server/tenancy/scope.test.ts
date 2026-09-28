@@ -163,3 +163,68 @@ describe("scopeArgs: fail closed", () => {
     rejects("Client", "somethingNew", {});
   });
 });
+
+describe("scopeArgs: append-only models", () => {
+  it.each(["update", "updateMany", "updateManyAndReturn", "delete", "deleteMany", "upsert"])(
+    "rejects %s on the audit log",
+    (operation) => {
+      rejects("AuditLog", operation, { where: { id: "a1" }, data: {}, create: {}, update: {} });
+    },
+  );
+
+  it("still scopes creates and reads of the audit log", () => {
+    expect(scope("AuditLog", "create", { data: { action: "client.created" } }).data).toEqual({
+      action: "client.created",
+      organizationId: ORG,
+    });
+    expect(scope("AuditLog", "findMany").where).toEqual({ organizationId: ORG });
+  });
+
+  it("rejects audit records written for another organization", () => {
+    rejects("AuditLog", "create", { data: { action: "client.created", organizationId: OTHER } });
+  });
+});
+
+describe("scopeArgs: nested reads into the global User model", () => {
+  it("allows reading a member's or actor's own columns", () => {
+    expect(() =>
+      scope("Membership", "findMany", {
+        select: { user: { select: { name: true, email: true } } },
+      }),
+    ).not.toThrow();
+    expect(() => scope("AuditLog", "findMany", { include: { actor: true } })).not.toThrow();
+    expect(() =>
+      scope("ProjectMember", "findMany", {
+        select: { membership: { select: { user: { select: { name: true } } } } },
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["sessions (credentials)", { include: { user: { include: { sessions: true } } } }],
+    ["accounts (password hashes)", { select: { user: { select: { accounts: true } } } }],
+    ["the user's other organizations", { include: { user: { select: { memberships: true } } } }],
+    ["activity in other organizations", { include: { actor: { include: { auditLogs: true } } } }],
+    [
+      "a nested path",
+      {
+        include: {
+          organization: {
+            include: { memberships: { include: { user: { include: { sessions: true } } } } },
+          },
+        },
+      },
+    ],
+    ["relation counts", { select: { user: { select: { _count: true } } } }],
+  ])("rejects %s", (_label, args) => {
+    rejects("Membership", "findMany", args);
+  });
+
+  it("applies to writes that return relations, too", () => {
+    rejects("Membership", "update", {
+      where: { id: "m1" },
+      data: { role: "ADMIN" },
+      include: { user: { include: { accounts: true } } },
+    });
+  });
+});

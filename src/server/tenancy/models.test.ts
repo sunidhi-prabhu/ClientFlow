@@ -18,3 +18,21 @@ describe("modelPolicies", () => {
     }
   });
 });
+
+describe("USER_RELATION_FIELDS", () => {
+  it("names every relation from a tenant model to User, and nothing else", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { USER_RELATION_FIELDS } = await import("@/server/tenancy/models");
+    const schema = readFileSync("prisma/schema.prisma", "utf8");
+    const toUser = new Set<string>();
+    const otherRelations = new Set<string>();
+    for (const [, model, body] of schema.matchAll(/^model (\w+) \{([\s\S]*?)^\}/gm)) {
+      if (modelPolicies[model as keyof typeof modelPolicies]?.scope === "global") continue;
+      for (const [, field, type] of body.matchAll(/^\s+(\w+)\s+(\w+)(?:\[\]|\?)?\s+@relation/gm)) {
+        (type === "User" ? toUser : otherRelations).add(field);
+      }
+    }
+    expect([...toUser].sort()).toEqual([...USER_RELATION_FIELDS].sort());
+    for (const field of USER_RELATION_FIELDS) expect(otherRelations.has(field)).toBe(false);
+  });
+});

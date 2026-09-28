@@ -1,5 +1,5 @@
 import { TenantIsolationError } from "@/lib/errors";
-import { getModelPolicy } from "@/server/tenancy/models";
+import { getModelPolicy, USER_RELATION_FIELDS, USER_SCALAR_FIELDS } from "@/server/tenancy/models";
 
 /**
  * Pure argument rewriting for the tenant-scoped Prisma client. Kept free of
@@ -14,6 +14,10 @@ import { getModelPolicy } from "@/server/tenancy/models";
  *   (`connect`, `create`, …) are rejected because they can re-parent rows
  *   across organizations; set foreign key columns (e.g. `clientId`) instead,
  *   which the composite foreign keys then verify.
+ * - Append-only models (the audit log) reject every update, delete and upsert.
+ * - Nested reads (`include` / `select`) may reach the global `User` model only
+ *   for its own columns, never its sessions, accounts or other organizations'
+ *   memberships and activity.
  * - Unknown models and operations are rejected (fail closed).
  */
 
@@ -96,6 +100,38 @@ function checkWriteData(
   return data;
 }
 
+/** A relation to `User`: `true`, or `{ select: { <user column>: boolean } }`. */
+function checkUserSelection(field: string, selection: unknown) {
+  if (typeof selection === "boolean") return;
+  if (isPlainObject(selection)) {
+    const keys = Object.keys(selection);
+    const columns = selection.select;
+    if (
+      keys.every((key) => key === "select") &&
+      isPlainObject(columns) &&
+      Object.entries(columns).every(
+        ([column, value]) => USER_SCALAR_FIELDS.has(column) && typeof value === "boolean",
+      )
+    ) {
+      return;
+    }
+  }
+  reject(`Only user columns can be read through "${field}" with the tenant client`);
+}
+
+/** Walk `include` / `select` trees (including `_count`) and check every relation to `User`. */
+function checkNestedReads(args: unknown) {
+  if (!isPlainObject(args)) return;
+  for (const key of ["include", "select"] as const) {
+    const selection = args[key];
+    if (!isPlainObject(selection)) continue;
+    for (const [field, nested] of Object.entries(selection)) {
+      if (USER_RELATION_FIELDS.has(field)) checkUserSelection(field, nested);
+      else checkNestedReads(nested);
+    }
+  }
+}
+
 export function scopeArgs({ model, operation, args, organizationId }: ScopeInput): Args {
   const policy = getModelPolicy(model);
   if (!policy || policy.scope === "global") {
@@ -103,7 +139,16 @@ export function scopeArgs({ model, operation, args, organizationId }: ScopeInput
   }
   if (args !== undefined && !isPlainObject(args)) reject("Invalid query arguments");
 
+  if (
+    "appendOnly" in policy &&
+    policy.appendOnly &&
+    (UPDATE_OPERATIONS.has(operation) || DELETE_OPERATIONS.has(operation) || operation === "upsert")
+  ) {
+    reject(`${model} records cannot be modified or deleted`);
+  }
+
   const input: Args = args ?? {};
+  checkNestedReads(input);
   const isRoot = policy.scope === "organization";
   // The organization root is matched on its own id; tenant models on organizationId.
   const field = isRoot ? "id" : "organizationId";

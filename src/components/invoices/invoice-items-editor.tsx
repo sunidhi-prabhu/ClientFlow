@@ -145,7 +145,13 @@ export function InvoiceItemsEditor({
 
   return (
     <div className="grid gap-3">
-      <div className="overflow-x-auto">
+      {/* Scrolls sideways on narrow screens; focusable so keyboard users can scroll it. */}
+      <div
+        role="region"
+        aria-label="Line items table"
+        tabIndex={0}
+        className="overflow-x-auto rounded-md focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+      >
         <div className="min-w-[36rem]">
           <div
             className={`${columns} border-b px-1 pb-2 text-xs font-medium text-muted-foreground`}

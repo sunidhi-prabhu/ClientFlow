@@ -136,6 +136,12 @@ Caller-supplied foreign ids are resolved before writing with
 `ReferenceNotFoundError` (404). The composite FK remains the final guard, and a
 P2003 from a race is mapped to that same 404.
 
+Nested reads can't leave the organization through `User`. Relations from
+tenant models to the global `User` (`user`, `actor`; kept complete by a test
+that parses the schema) may only select the user's own columns in `include` /
+`select`. A user's sessions, accounts, and memberships or activity in other
+organizations are rejected (`TenantIsolationError`). (Audit L1.)
+
 `models.ts` classifies every model as `tenant`, `organization` or `global`.
 It is typed `satisfies Record<Prisma.ModelName, …>`, so adding a model without
 classifying it fails type-checking. A unit test also checks the
@@ -219,6 +225,7 @@ permissions, never `role === "ADMIN"`.
 | Tasks        | `task:*`                                                 | all   | all          | all               | read, create, update |
 | Invoices     | `invoice:read` / `create` / `update` / `delete` / `send` | all   | all          | all except delete | none                 |
 | Reports      | `report:read`                                            | yes   | yes          | yes               | no                   |
+| Audit log    | `audit:read`                                             | yes   | yes          | no                | no                   |
 
 Roles are strictly nested (each has everything the role below has).
 
@@ -230,8 +237,12 @@ members and grant roles up to their own rank.
 **At least one OWNER** is enforced in two layers:
 
 1. **Application check** (`src/server/organizations/ownership.ts`). Change or
-   remove memberships only through `changeMembershipRole(db, id, role)` and
-   `removeMembership(db, id)`. Inside a transaction they refuse to demote or
+   remove memberships only through `changeMembershipRole(db, id, role, actor)`
+   and `removeMembership(db, id, actor)`. `actor` is required: a request's
+   tenant context, for which the service itself enforces `member:update-role`
+   plus `assertCanChangeRole`, or `member:remove` plus `assertCanRemoveMember`,
+   or `SYSTEM_ACTOR` for maintenance code (audited as a system change). The
+   actor is recorded in the audit log. (Audit L3.) Inside a transaction they refuse to demote or
    remove the last OWNER with `OwnerRequiredError`, a 409 `CONFLICT`: "An
    organization must always have at least one owner. Make another member an
    owner first." Callers remain responsible for authorization
@@ -319,11 +330,30 @@ deferred with Next.js `after()`, so response timing does not reveal whether an
 email was sent. Only the message type is logged, never codes, links or tokens.
 Better Auth's own logging is limited to warnings.
 
-**Rate limiting** (Better Auth, disabled in tests): 5/min for sign-in,
-sign-up, OTP and change-password, 3/min for reset requests, 100/min otherwise,
-counted per client IP. Counters are kept **in the memory of each server
-process**. That is correct for a single instance only; see the production
-requirement in §12.
+**Rate limiting** (Better Auth, disabled in tests unless `AUTH_RATE_LIMIT=on`):
+5/min for sign-in, sign-up, OTP and change-password, 3/min for reset
+requests, 100/min otherwise, counted per client IP. Counters are kept **in the
+memory of each server process**. That is correct for a single instance only;
+see the production requirement in §12.
+
+- **The auth forms go through the same limiter.** Better Auth rate-limits,
+  checks the origin and applies `disabledPaths` only in its HTTP router;
+  `auth.api.*` calls skip all three. The auth Server Actions therefore call
+  endpoints through `callAuthEndpoint` (`src/server/auth/endpoint.ts`). It
+  builds a request to the handler with the caller's headers and copies the
+  response cookies onto the Server Action response. Never call
+  `getAuth().api.*` from a request path. (Security audit H1; regression test
+  in `tests/integration/auth-rate-limit.test.ts`.)
+- **Client IP.** Next.js keeps a client-supplied `X-Forwarded-For`, and Better
+  Auth's default trusts a single-value header, so a client could choose its
+  own IP (and a fresh bucket) per request. `AUTH_CLIENT_IP_HEADER` (a header
+  the edge overwrites) or `AUTH_TRUSTED_PROXIES` (proxies stripped from the
+  right of `X-Forwarded-For`) configures `advanced.ipAddress`
+  (`client-ip.ts`), and production refuses to start without one of them. The
+  application must only be reachable through that proxy. (Audit M1.)
+- **Display names** are limited to 100 characters on every endpoint that sets
+  one (`hooks.before` for `/sign-up/email` and `/update-user`). Names coming
+  from Google are truncated on account creation. (Audit L5.)
 
 #### Account-management endpoints
 
@@ -757,6 +787,119 @@ added in migration `dashboard_activity_indexes`. Nothing is cached.
 added together. A sum outside the exact integer range throws instead of
 rounding.
 
+## 6f. Audit logging
+
+One append-only, tenant-owned table, `AuditLog`, with these columns:
+
+- `id` and `organizationId`;
+- `actorUserId`, nullable;
+- `action` (`<resource>.<verb>`) and `resourceType`;
+- `resourceId`, nullable;
+- `metadata` (a JSON object) and `createdAt`.
+
+The vocabulary is defined in `src/lib/audit.ts`.
+
+**Events:**
+
+| Area                     | Actions                                                                                                                                                     | Where recorded                                                             |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Authentication           | `auth.login`, `auth.logout`, `auth.login_failed`, `auth.verification_failed`, `auth.password_changed`, `auth.password_change_failed`, `auth.password_reset` | Better Auth hooks (`src/server/auth/auth.ts` → `src/server/auth/audit.ts`) |
+| Organization and members | `organization.created`, `member.added`, `member.role_changed` (with permissions granted/revoked), `member.removed`                                          | `organizations/bootstrap.ts`, `organizations/ownership.ts`                 |
+| Clients                  | `client.created`, `client.updated`, `client.archived`, `client.restored`                                                                                    | clients service                                                            |
+| Projects                 | `project.created`, `project.updated`, `project.status_changed`, `project.archived`, `project.restored`, `project.member_added`, `project.member_removed`    | projects service                                                           |
+| Tasks                    | `task.assigned`, `task.unassigned` (including assignment on creation), `task.deleted`                                                                       | tasks service                                                              |
+| Invoices                 | `invoice.created`, `invoice.issued`, `invoice.paid`, `invoice.cancelled` (previous status recorded as displayed, so OVERDUE → PAID)                         | invoices service                                                           |
+
+There are no editable per-member permissions: a member's permissions are
+their role. "Permission changes" are therefore audited as `member.role_changed`,
+with the exact lists of permissions granted and revoked.
+
+**Writing.** `recordAudit(tx, ctx, event)` in `src/server/audit/service.ts` is
+the only helper that builds records:
+
+- The actor is `ctx.userId` from the session, and the organization is
+  `ctx.organization.id`.
+- The tenant client rejects a record for any other organization.
+- Business events are written inside the operation's own transaction, so the
+  change and its record commit or roll back together. A failed or forbidden
+  operation leaves no record.
+- No route or Server Action writes audit records; a test checks `src/app`
+  statically. Values from the request (e.g. `actorUserId` or `organizationId`
+  in action input) are stripped by Zod and never reach a record.
+
+**Authentication events** belong to an account, not an organization:
+
+- One row is written per organization the user is a member of, where that
+  organization's administrators can see it.
+- The user always comes from Better Auth, never from the request body:
+  - sign-in: the new session (`databaseHooks.session.create`);
+  - sign-out: the deleted session on `/sign-out`;
+  - failed sign-in: the account found for the attempted email, with no actor;
+  - password change: the new session;
+  - password reset: `onPasswordReset`.
+- A failed sign-in for an unknown address, or for a user without
+  organizations, is only logged, without the address.
+- Recording is best effort: the sign-in or sign-out has already happened, so
+  a write failure is logged instead of failing it.
+- Metadata includes the IP and user agent as seen by Better Auth.
+
+**Secrets.** `sanitizeAuditMetadata` makes metadata safe to store:
+
+- drops keys that look like credentials at any depth (password, token,
+  secret, API key, authorization, cookie, session, OTP, `code`, hash,
+  credential, private key, signature);
+- converts values to JSON;
+- caps string length, array length and depth.
+
+Callers never pass passwords or tokens in the first place; the hooks never
+read the request's password.
+
+**Immutability:**
+
+1. The tenant client refuses `update*`, `delete*` and `upsert` on append-only
+   models (`appendOnly` in `src/server/tenancy/models.ts`).
+2. The `AuditLog_guard` trigger (migration `audit_logging`) rejects UPDATE
+   and DELETE from any client. The only exceptions are foreign-key actions
+   (`pg_trigger_depth() > 1`):
+   - deleting the organization removes its log;
+   - deleting a user only clears `actorUserId`.
+3. CHECK constraints: the action format, the allowed resource types, and
+   metadata must be an object.
+
+`TRUNCATE` and the table owner are outside these guards. The application
+must therefore **not** connect as the schema owner. `db/runtime-role.sql`
+grants a runtime role (`clientflow_app`) row access only: no TRUNCATE, no DDL,
+no trigger changes, and no UPDATE or DELETE on `AuditLog`. Foreign-key
+cascades still work, because PostgreSQL runs them as the table owner.
+`tests/integration/database-privileges.test.ts` applies the same script to a
+test role and verifies both halves. (Audit M2; the role split itself is a
+deployment step, see §12.)
+
+**Reading.** `/o/[orgSlug]/audit-log` is the audit log page:
+
+- It uses `tenantPage(orgSlug, "audit:read")`: OWNER and ADMIN only. Other
+  roles see "access denied", and the nav item is hidden from them.
+  Non-members get 404 and signed-out visitors are redirected.
+- It is newest first and paginated (25 per page). The count and the reachable
+  pages are capped at `AUDIT_COUNT_LIMIT` (10,000) matching events. Beyond
+  that the page shows "10,000+" and the newest 10,000, with a hint to narrow
+  the date range. Below the cap, counts are exact.
+  - An exact `COUNT(*)` and a deep `OFFSET` grow with the log, which grows with
+    every change and sign-in. The capped count is ordered like the page, so
+    each filter's `(organizationId, …, createdAt)` index stops it after
+    10,001 entries.
+  - Pages are read from `(organizationId, createdAt, id)` without a sort.
+  - Measured on 1M events (performance pass): first page 50 → 0.8 ms of
+    database time, deepest page 191 → 1.5 ms.
+- Filters are in the URL and parsed with Zod; invalid values are ignored:
+  - an inclusive UTC date range;
+  - actor (current members, or "no signed-in actor");
+  - action;
+  - resource type.
+- Each row shows the action, the resource with a link when it still has a
+  page, a summary of changes, and the full sanitized metadata on demand.
+- Queries use the `(organizationId, …, createdAt)` indexes.
+
 ## 7. Error handling
 
 Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.
@@ -867,13 +1010,30 @@ platforms. Configure `BETTER_AUTH_SECRET`, an HTTPS `BETTER_AUTH_URL`, a real
 SMTP provider (`SMTP_URL`, `EMAIL_FROM`, preferably `smtps://`) and,
 optionally, Google OAuth credentials.
 
-> **Production deployment task: shared rate-limit storage.** The
-> authentication rate limiter keeps its counters in each server process's
-> memory. That is correct for **one** application instance. With several
-> instances (horizontal scaling, serverless, rolling deploys), each keeps its
-> own counters, so the effective limit multiplies by the number of instances,
-> and counters reset on every restart or cold start. **Before running more
-> than one instance**, configure Better Auth's `rateLimit.storage` as
-> `"database"` (adds a table via migration) or `"secondary-storage"` (e.g.
-> Redis), and confirm client IPs are taken from the trusted proxy header
-> (`advanced.ipAddress`). Until then, deploy a single instance.
+> **Production deployment requirements (security audit).**
+>
+> 1. **Database roles (M2).** Run `prisma migrate deploy` as the schema owner.
+>    Create `clientflow_app` (LOGIN) once, apply
+>    `psql "<owner URL>" -v ON_ERROR_STOP=1 -f db/runtime-role.sql` after every
+>    migration, and set the application's `DATABASE_URL` to `clientflow_app`.
+> 2. **TLS to the database (L10).** A non-local `DATABASE_URL` must include
+>    `sslmode=require|verify-ca|verify-full`; production refuses to start
+>    otherwise.
+> 3. **Client IP (M1).** Put the app behind a proxy that sets or overwrites the
+>    client address, make it the only way in, and set
+>    `AUTH_CLIENT_IP_HEADER` or `AUTH_TRUSTED_PROXIES` (required in
+>    production).
+>
+> **Rate-limit storage.** Counters are stored in PostgreSQL (`RateLimit`,
+> Better Auth `rateLimit.storage: "database"`), so every instance enforces the
+> same limits and restarts do not reset them. Client IPs must come from the
+> trusted proxy configuration above.
+>
+> **Startup and health.** `src/instrumentation.ts` validates all configuration
+> before the server accepts requests (invalid configuration stops the
+> process) and logs every server error as one JSON line with its digest.
+> `/api/health/live` is the liveness probe (no database); `/api/health` is the
+> readiness probe (database check, 503).
+>
+> The full deployment, migration, rollback, backup and monitoring procedure is
+> in [operations.md](operations.md).

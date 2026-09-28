@@ -16,6 +16,8 @@ type ModelPolicy = {
   scope: ModelScope;
   /** Scalar columns: the only keys allowed in write `data`. */
   scalarFields: Readonly<Record<string, string>>;
+  /** Rows can be created and read but never updated or deleted (e.g. the audit log). */
+  appendOnly?: boolean;
 };
 
 /**
@@ -33,11 +35,13 @@ export const modelPolicies = {
   Task: { scope: "tenant", scalarFields: Prisma.TaskScalarFieldEnum },
   Invoice: { scope: "tenant", scalarFields: Prisma.InvoiceScalarFieldEnum },
   InvoiceItem: { scope: "tenant", scalarFields: Prisma.InvoiceItemScalarFieldEnum },
+  AuditLog: { scope: "tenant", scalarFields: Prisma.AuditLogScalarFieldEnum, appendOnly: true },
   // Authentication (Better Auth): accessed only through src/server/auth.
   User: { scope: "global", scalarFields: Prisma.UserScalarFieldEnum },
   Session: { scope: "global", scalarFields: Prisma.SessionScalarFieldEnum },
   Account: { scope: "global", scalarFields: Prisma.AccountScalarFieldEnum },
   Verification: { scope: "global", scalarFields: Prisma.VerificationScalarFieldEnum },
+  RateLimit: { scope: "global", scalarFields: Prisma.RateLimitScalarFieldEnum },
 } satisfies Record<Prisma.ModelName, ModelPolicy>;
 
 export type ModelName = keyof typeof modelPolicies;
@@ -45,3 +49,17 @@ export type ModelName = keyof typeof modelPolicies;
 export function getModelPolicy(model: string): ModelPolicy | undefined {
   return Object.hasOwn(modelPolicies, model) ? modelPolicies[model as ModelName] : undefined;
 }
+
+/**
+ * Relation fields of tenant models that point to the global `User` model
+ * (Membership.user, *Activity.actor, AuditLog.actor). Through the tenant
+ * client they may only select the user's own scalar columns: `User` also
+ * leads to sessions and accounts (credentials) and to the user's memberships
+ * and activity in other organizations. Kept complete by models.test.ts.
+ */
+export const USER_RELATION_FIELDS: ReadonlySet<string> = new Set(["user", "actor"]);
+
+/** Columns of `User` that may be read through those relations. */
+export const USER_SCALAR_FIELDS: ReadonlySet<string> = new Set(
+  Object.keys(Prisma.UserScalarFieldEnum),
+);

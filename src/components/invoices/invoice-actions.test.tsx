@@ -72,3 +72,23 @@ describe("InvoiceActions", () => {
     expect(router.refresh).not.toHaveBeenCalled();
   });
 });
+
+describe("InvoiceActions keyboard focus", () => {
+  afterEach(cleanup);
+
+  it("moves focus to the confirm button, and back to the action that opened it", () => {
+    const actions = { issue: vi.fn(), pay: vi.fn(), cancel: vi.fn() };
+    render(
+      <InvoiceActions
+        organizationSlug="acme"
+        invoiceId="inv1"
+        allowed={{ issue: true, pay: false, cancel: true }}
+        actions={actions}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel invoice" }));
+    expect(screen.getByRole("button", { name: "Confirm cancellation" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("button", { name: "Cancel invoice" })).toHaveFocus();
+  });
+});

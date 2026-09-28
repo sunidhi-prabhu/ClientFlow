@@ -66,7 +66,7 @@ export function ClientsTable({ clients, basePath }: { clients: ClientRow[]; base
         </table>
       </div>
 
-      <ul className="grid gap-2 md:hidden">
+      <ul className="grid grid-cols-1 gap-2 md:hidden">
         {clients.map((client) => (
           <li key={client.id}>
             <Link

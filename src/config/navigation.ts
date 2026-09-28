@@ -1,4 +1,11 @@
-import { FolderKanban, LayoutDashboard, type LucideIcon, Receipt, Users } from "lucide-react";
+import {
+  FolderKanban,
+  LayoutDashboard,
+  type LucideIcon,
+  Receipt,
+  ScrollText,
+  Users,
+} from "lucide-react";
 
 import { type Permission } from "@/lib/permissions";
 
@@ -20,4 +27,5 @@ export const mainNavigation: NavItem[] = [
   { title: "Clients", href: "/clients", icon: Users },
   { title: "Projects", href: "/projects", icon: FolderKanban },
   { title: "Invoices", href: "/invoices", icon: Receipt, permission: "invoice:read" },
+  { title: "Audit log", href: "/audit-log", icon: ScrollText, permission: "audit:read" },
 ];

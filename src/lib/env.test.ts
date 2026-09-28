@@ -69,9 +69,76 @@ describe("getAuthEnv", () => {
     stub({ ...valid, NODE_ENV: "production", BETTER_AUTH_URL: "http://app.clientflow.example" });
     expect((await loadEnv()).getAuthEnv).toThrow(/https/);
 
-    stub({ BETTER_AUTH_URL: "http://localhost:3000" });
+    // (Production also needs client IP configuration, see below.)
+    stub({ BETTER_AUTH_URL: "http://localhost:3000", AUTH_TRUSTED_PROXIES: "127.0.0.1" });
     expect((await loadEnv()).getAuthEnv()).toMatchObject({
       BETTER_AUTH_URL: "http://localhost:3000",
+    });
+  });
+
+  it("requires explicit client IP configuration in production", async () => {
+    stub({ ...valid, NODE_ENV: "production", AUTH_CLIENT_IP_HEADER: "", AUTH_TRUSTED_PROXIES: "" });
+    expect((await loadEnv()).getAuthEnv).toThrow(/AUTH_CLIENT_IP_HEADER or AUTH_TRUSTED_PROXIES/);
+
+    stub({ AUTH_TRUSTED_PROXIES: "10.0.0.0/8, 2001:db8::/32 ,203.0.113.7" });
+    expect((await loadEnv()).getAuthEnv()).toMatchObject({
+      AUTH_TRUSTED_PROXIES: ["10.0.0.0/8", "2001:db8::/32", "203.0.113.7"],
+    });
+
+    stub({ AUTH_TRUSTED_PROXIES: "", AUTH_CLIENT_IP_HEADER: "cf-connecting-ip" });
+    expect((await loadEnv()).getAuthEnv()).toMatchObject({
+      AUTH_CLIENT_IP_HEADER: "cf-connecting-ip",
+    });
+  });
+
+  it("rejects malformed proxy lists and header names", async () => {
+    stub({ ...valid, AUTH_TRUSTED_PROXIES: "10.0.0.0/33,not-an-ip" });
+    expect((await loadEnv()).getAuthEnv).toThrow(/10\.0\.0\.0\/33, not-an-ip/);
+    stub({ AUTH_TRUSTED_PROXIES: "", AUTH_CLIENT_IP_HEADER: "X-Real-IP: evil" });
+    expect((await loadEnv()).getAuthEnv).toThrow(/AUTH_CLIENT_IP_HEADER/);
+  });
+
+  it("only lets tests turn rate limiting on (never off)", async () => {
+    stub({ ...valid, AUTH_RATE_LIMIT: "off" });
+    expect((await loadEnv()).getAuthEnv).toThrow(/AUTH_RATE_LIMIT/);
+    stub({ AUTH_RATE_LIMIT: "on" });
+    expect((await loadEnv()).getAuthEnv()).toMatchObject({ AUTH_RATE_LIMIT: "on" });
+  });
+});
+
+describe("getServerEnv in production", () => {
+  it("requires TLS for a non-local database", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DATABASE_URL", "postgresql://app:secret@db.internal:5432/clientflow");
+    expect((await loadEnv()).getServerEnv).toThrow(/TLS/);
+
+    vi.stubEnv(
+      "DATABASE_URL",
+      "postgresql://app:secret@db.internal:5432/clientflow?sslmode=verify-full",
+    );
+    expect((await loadEnv()).getServerEnv()).toMatchObject({ NODE_ENV: "production" });
+
+    vi.stubEnv("DATABASE_URL", "postgresql://app:secret@localhost:5432/clientflow");
+    expect((await loadEnv()).getServerEnv()).toMatchObject({ NODE_ENV: "production" });
+  });
+});
+
+describe("database connection settings", () => {
+  it("default to bounded values and reject out-of-range ones", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("DATABASE_URL", "postgresql://user:pass@localhost:5432/clientflow");
+    expect((await loadEnv()).getServerEnv()).toMatchObject({
+      DATABASE_POOL_MAX: 10,
+      DATABASE_CONNECT_TIMEOUT_MS: 10_000,
+      DATABASE_STATEMENT_TIMEOUT_MS: 30_000,
+    });
+    vi.stubEnv("DATABASE_POOL_MAX", "0");
+    expect((await loadEnv()).getServerEnv).toThrow(/DATABASE_POOL_MAX/);
+    vi.stubEnv("DATABASE_POOL_MAX", "25");
+    vi.stubEnv("DATABASE_STATEMENT_TIMEOUT_MS", "5000");
+    expect((await loadEnv()).getServerEnv()).toMatchObject({
+      DATABASE_POOL_MAX: 25,
+      DATABASE_STATEMENT_TIMEOUT_MS: 5_000,
     });
   });
 });

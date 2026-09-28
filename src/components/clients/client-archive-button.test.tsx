@@ -70,3 +70,23 @@ describe("ClientArchiveButton", () => {
     expect(router.refresh).toHaveBeenCalled();
   });
 });
+
+describe("ClientArchiveButton keyboard focus", () => {
+  afterEach(cleanup);
+
+  it("moves focus to the confirmation and back to Archive when cancelled", () => {
+    render(
+      <ClientArchiveButton
+        organizationSlug="acme"
+        clientId="client_1"
+        archived={false}
+        archiveAction={vi.fn()}
+        restoreAction={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    expect(screen.getByRole("button", { name: "Confirm archive" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Archive" })).toHaveFocus();
+  });
+});

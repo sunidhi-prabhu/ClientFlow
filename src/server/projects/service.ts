@@ -8,6 +8,7 @@ import {
   type ListProjectsQuery,
   type ProjectFields,
 } from "@/lib/validation/project";
+import { recordAudit } from "@/server/audit/service";
 import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
@@ -135,12 +136,28 @@ async function applyChanges(
   }
   if (!statusChange.status && Object.keys(otherChanges).length === 0) return existing;
 
-  const project = await tx.project.update({ where: { id: existing.id }, data: next });
+  // Compare-and-set: an archive committed meanwhile makes the project read-only.
+  const { count } = await tx.project.updateMany({
+    where: { id: existing.id, status: { not: "ARCHIVED" } },
+    data: next,
+  });
+  if (count === 0) throw new ConflictError("Restore this project before changing it");
+  const project = await tx.project.findUniqueOrThrow({ where: { id: existing.id } });
   if (statusChange.status) {
     await recordActivity(tx, deps, existing.id, "STATUS_CHANGED", statusChange);
+    await recordAudit(tx, deps.ctx, {
+      action: "project.status_changed",
+      resourceId: existing.id,
+      metadata: { name: project.name, status: statusChange.status },
+    });
   }
   if (Object.keys(otherChanges).length > 0) {
     await recordActivity(tx, deps, existing.id, "UPDATED", otherChanges);
+    await recordAudit(tx, deps.ctx, {
+      action: "project.updated",
+      resourceId: existing.id,
+      metadata: { name: project.name, changes: otherChanges },
+    });
   }
   return project;
 }
@@ -153,6 +170,11 @@ export async function createProject(deps: Deps, input: ProjectFields) {
       data: { ...input, organizationId: ctx.organization.id },
     });
     await recordActivity(tx, deps, project.id, "CREATED");
+    await recordAudit(tx, ctx, {
+      action: "project.created",
+      resourceId: project.id,
+      metadata: { name: project.name, status: project.status, clientId: project.clientId },
+    });
     return project;
   });
 }
@@ -185,12 +207,22 @@ export async function archiveProject(deps: Deps, id: string) {
   return deps.db.$transaction(async (tx) => {
     const existing = (await tx.project.findUnique({ where: { id } })) ?? notFound();
     if (existing.status === "ARCHIVED") throw new ConflictError("This project is already archived");
-    const project = await tx.project.update({
-      where: { id },
+    // Compare-and-set on the status just read (it is remembered for restoring).
+    const { count } = await tx.project.updateMany({
+      where: { id, status: existing.status },
       data: { status: "ARCHIVED", statusBeforeArchive: existing.status, archivedAt: new Date() },
     });
+    if (count === 0) {
+      throw new ConflictError("This project was changed by someone else. Refresh and try again.");
+    }
+    const project = await tx.project.findUniqueOrThrow({ where: { id } });
     await recordActivity(tx, deps, id, "ARCHIVED", {
       status: { from: existing.status, to: "ARCHIVED" },
+    });
+    await recordAudit(tx, deps.ctx, {
+      action: "project.archived",
+      resourceId: id,
+      metadata: { name: project.name, status: { from: existing.status, to: "ARCHIVED" } },
     });
     return project;
   });
@@ -202,11 +234,18 @@ export async function restoreProject(deps: Deps, id: string) {
     const existing = (await tx.project.findUnique({ where: { id } })) ?? notFound();
     if (existing.status !== "ARCHIVED") throw new ConflictError("This project is not archived");
     const status = existing.statusBeforeArchive ?? "ACTIVE";
-    const project = await tx.project.update({
-      where: { id },
+    const { count } = await tx.project.updateMany({
+      where: { id, status: "ARCHIVED" },
       data: { status, statusBeforeArchive: null, archivedAt: null },
     });
+    if (count === 0) throw new ConflictError("This project is not archived");
+    const project = await tx.project.findUniqueOrThrow({ where: { id } });
     await recordActivity(tx, deps, id, "RESTORED", { status: { from: "ARCHIVED", to: status } });
+    await recordAudit(tx, deps.ctx, {
+      action: "project.restored",
+      resourceId: id,
+      metadata: { name: project.name, status: { from: "ARCHIVED", to: status } },
+    });
     return project;
   });
 }
@@ -218,7 +257,7 @@ export async function restoreProject(deps: Deps, id: string) {
  */
 export async function addProjectMember(deps: Deps, projectId: string, userId: string) {
   return deps.db.$transaction(async (tx) => {
-    await findEditable(tx, projectId);
+    const project = await findEditable(tx, projectId);
     const membership = await tx.membership.findFirst({
       where: { userId },
       select: { user: { select: { name: true } } },
@@ -234,13 +273,18 @@ export async function addProjectMember(deps: Deps, projectId: string, userId: st
     await recordActivity(tx, deps, projectId, "MEMBER_ADDED", {
       member: { userId, name: membership.user.name },
     });
+    await recordAudit(tx, deps.ctx, {
+      action: "project.member_added",
+      resourceId: projectId,
+      metadata: { name: project.name, member: { userId, name: membership.user.name } },
+    });
     return member;
   });
 }
 
 export async function removeProjectMember(deps: Deps, projectId: string, userId: string) {
   return deps.db.$transaction(async (tx) => {
-    await findEditable(tx, projectId);
+    const project = await findEditable(tx, projectId);
     const member = await tx.projectMember.findFirst({
       where: { projectId, userId },
       select: { id: true, membership: { select: { user: { select: { name: true } } } } },
@@ -250,6 +294,11 @@ export async function removeProjectMember(deps: Deps, projectId: string, userId:
     await tx.projectMember.delete({ where: { id: member.id } });
     await recordActivity(tx, deps, projectId, "MEMBER_REMOVED", {
       member: { userId, name: member.membership.user.name },
+    });
+    await recordAudit(tx, deps.ctx, {
+      action: "project.member_removed",
+      resourceId: projectId,
+      metadata: { name: project.name, member: { userId, name: member.membership.user.name } },
     });
   });
 }
@@ -316,10 +365,27 @@ export async function listProjects(db: TenantDb, query: ListProjectsQuery) {
   const scopeFilters = { AND: [clientWhere(query.clientId), searchWhere(query.q)] };
   const where = { AND: [statusWhere(query.status), scopeFilters] };
 
-  const [total, statusGroups] = await Promise.all([
-    db.project.count({ where }),
-    db.project.groupBy({ by: ["status"], _count: { _all: true }, where: scopeFilters }),
-  ]);
+  // One aggregate for both the per-status counts and the total (no separate COUNT).
+  const statusGroups = await db.project.groupBy({
+    by: ["status"],
+    _count: { _all: true },
+    where: scopeFilters,
+  });
+  const statusCounts: Record<ProjectStatus, number> = {
+    PLANNING: 0,
+    ACTIVE: 0,
+    ON_HOLD: 0,
+    COMPLETED: 0,
+    ARCHIVED: 0,
+  };
+  for (const group of statusGroups) statusCounts[group.status] = group._count._all;
+  const allStatuses = Object.values(statusCounts).reduce((sum, count) => sum + count, 0);
+  const total =
+    query.status === "all"
+      ? allStatuses
+      : query.status === "current"
+        ? allStatuses - statusCounts.ARCHIVED
+        : statusCounts[query.status];
 
   const pageCount = Math.max(1, Math.ceil(total / query.pageSize));
   const page = Math.min(query.page, pageCount);
@@ -341,15 +407,6 @@ export async function listProjects(db: TenantDb, query: ListProjectsQuery) {
       _count: { select: { members: true } },
     },
   });
-
-  const statusCounts: Record<ProjectStatus, number> = {
-    PLANNING: 0,
-    ACTIVE: 0,
-    ON_HOLD: 0,
-    COMPLETED: 0,
-    ARCHIVED: 0,
-  };
-  for (const group of statusGroups) statusCounts[group.status] = group._count._all;
 
   return { items, total, page, pageSize: query.pageSize, pageCount, statusCounts };
 }

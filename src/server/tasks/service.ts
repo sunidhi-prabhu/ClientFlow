@@ -4,6 +4,7 @@ import { type Prisma } from "@/generated/prisma/client";
 import { type ProjectActivityType, type TaskStatus } from "@/generated/prisma/enums";
 import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
 import { type TaskBoardQuery, type TaskFields, UNASSIGNED_FILTER } from "@/lib/validation/task";
+import { recordAudit } from "@/server/audit/service";
 import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
@@ -169,6 +170,17 @@ async function applyChanges(tx: Tx, deps: Deps, existing: ExistingTask, next: Pa
   if (events.length === 0) return existing;
   const task = await tx.task.update({ where: { id: existing.id }, data: next });
   for (const event of events) await record(tx, deps, task, event.type, event.changes);
+  const assignment = (
+    events.find((event) => event.type === "TASK_ASSIGNMENT_CHANGED")?.changes as
+      { assignee: { from: Person; to: Person } } | undefined
+  )?.assignee;
+  if (assignment) {
+    await recordAudit(tx, deps.ctx, {
+      action: assignment.to ? "task.assigned" : "task.unassigned",
+      resourceId: task.id,
+      metadata: { title: task.title, projectId: task.projectId, assignee: assignment },
+    });
+  }
   return task;
 }
 
@@ -183,6 +195,18 @@ export async function createTask(deps: Deps, projectId: string, input: TaskField
       data: { ...input, projectId, organizationId: ctx.organization.id },
     });
     await record(tx, deps, task, "TASK_CREATED", { task: { title: task.title }, assignee });
+    if (assignee) {
+      await recordAudit(tx, ctx, {
+        action: "task.assigned",
+        resourceId: task.id,
+        metadata: {
+          title: task.title,
+          projectId,
+          assignee: { from: null, to: assignee },
+          onCreate: true,
+        },
+      });
+    }
     return task;
   });
 }
@@ -247,6 +271,11 @@ export async function deleteTask(deps: Deps, id: string) {
     const existing = await findTaskForChange(tx, id);
     await tx.task.delete({ where: { id } });
     await record(tx, deps, existing, "TASK_DELETED", { task: { title: existing.title } });
+    await recordAudit(tx, deps.ctx, {
+      action: "task.deleted",
+      resourceId: id,
+      metadata: { title: existing.title, projectId: existing.projectId, status: existing.status },
+    });
     return { id, projectId: existing.projectId };
   });
 }
@@ -311,7 +340,9 @@ export async function listProjectTasks(
 
 /** A task's history (most recent first). 404 if the task is not in this organization. */
 export async function listTaskActivity(db: TenantDb, taskId: string, limit = 30) {
-  await getTask(db, taskId);
+  // Existence check only (the page has already loaded the task with its relations).
+  const task = await db.task.findUnique({ where: { id: taskId }, select: { id: true } });
+  if (!task) taskNotFound();
   return db.projectActivity.findMany({
     where: { taskId },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],

@@ -13,10 +13,9 @@ import { InvoiceStatusBadge } from "@/components/invoices/invoice-status-badge";
 import { NotFoundError } from "@/lib/errors";
 import { formatInvoiceNumber, invoiceDisplayStatus } from "@/lib/invoices";
 import { formatMoney } from "@/lib/money";
-import { listInvoicesQuery } from "@/lib/validation/invoice";
 import { hasPermission } from "@/lib/permissions";
 import { getClient, listClientActivity, listClientProjects } from "@/server/clients/service";
-import { listInvoices } from "@/server/invoices/service";
+import { listClientInvoices } from "@/server/invoices/service";
 import { tenantPage } from "@/server/protected";
 
 import { archiveClientAction, restoreClientAction } from "../actions";
@@ -44,9 +43,7 @@ export default async function ClientDetailsPage({
   const [activity, projects, invoices] = await Promise.all([
     listClientActivity(db, client.id),
     canSeeProjects ? listClientProjects(db, client.id) : Promise.resolve([]),
-    canSeeInvoices
-      ? listInvoices(db, listInvoicesQuery.parse({ clientId: client.id, pageSize: 5 }))
-      : Promise.resolve(null),
+    canSeeInvoices ? listClientInvoices(db, client.id) : Promise.resolve(null),
   ]);
 
   const slug = ctx.organization.slug;
@@ -67,7 +64,9 @@ export default async function ClientDetailsPage({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-semibold tracking-tight break-words">{client.name}</h1>
+              <h1 className="min-w-0 text-2xl font-semibold tracking-tight break-words">
+                {client.name}
+              </h1>
               <ClientStatusBadge status={client.status} />
             </div>
             <p className="text-sm text-muted-foreground">
@@ -167,7 +166,7 @@ export default async function ClientDetailsPage({
             </CardContent>
           </Card>
 
-          <div className="grid gap-6 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -180,16 +179,16 @@ export default async function ClientDetailsPage({
                 ) : projects.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No projects for this client yet.</p>
                 ) : (
-                  <ul className="grid gap-2 text-sm">
+                  <ul className="grid grid-cols-1 gap-2 text-sm">
                     {projects.map((project) => (
                       <li key={project.id} className="flex justify-between gap-2">
                         <Link
                           href={`/o/${slug}/projects/${project.id}`}
-                          className="truncate hover:underline"
+                          className="min-w-0 truncate hover:underline"
                         >
                           {project.name}
                         </Link>
-                        <span className="text-muted-foreground tabular-nums">
+                        <span className="shrink-0 text-muted-foreground tabular-nums">
                           {dateFormat.format(project.createdAt)}
                         </span>
                       </li>
@@ -207,11 +206,11 @@ export default async function ClientDetailsPage({
               <CardContent className="grid gap-3">
                 {!invoices ? (
                   <p className="text-sm text-muted-foreground">Your role cannot view invoices.</p>
-                ) : invoices.items.length === 0 ? (
+                ) : invoices.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No invoices for this client yet.</p>
                 ) : (
-                  <ul className="grid gap-2 text-sm">
-                    {invoices.items.map((invoice) => (
+                  <ul className="grid grid-cols-1 gap-2 text-sm">
+                    {invoices.map((invoice) => (
                       <li key={invoice.id} className="flex items-center justify-between gap-2">
                         <Link
                           href={`/o/${slug}/invoices/${invoice.id}`}

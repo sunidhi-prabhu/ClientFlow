@@ -81,7 +81,9 @@ export default async function ProjectDetailsPage({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-semibold tracking-tight break-words">{project.name}</h1>
+              <h1 className="min-w-0 text-2xl font-semibold tracking-tight break-words">
+                {project.name}
+              </h1>
               <ProjectStatusBadge status={project.status} />
             </div>
             <p className="text-sm text-muted-foreground">

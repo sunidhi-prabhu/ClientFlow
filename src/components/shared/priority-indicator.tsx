@@ -15,7 +15,7 @@ export const PRIORITY_LABELS: Record<Priority, string> = {
 const STYLES = {
   LOW: { icon: ChevronDown, className: "text-muted-foreground" },
   MEDIUM: { icon: Equal, className: "text-foreground" },
-  HIGH: { icon: ChevronUp, className: "text-amber-600 dark:text-amber-400" },
+  HIGH: { icon: ChevronUp, className: "text-amber-700 dark:text-amber-400" },
   URGENT: { icon: ChevronsUp, className: "text-destructive" },
 } satisfies Record<Priority, { icon: unknown; className: string }>;
 

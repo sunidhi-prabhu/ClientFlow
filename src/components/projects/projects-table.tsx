@@ -99,12 +99,12 @@ export function ProjectsTable({
         </table>
       </div>
 
-      <ul className="grid gap-2 lg:hidden">
+      <ul className="grid grid-cols-1 gap-2 lg:hidden">
         {projects.map((project) => (
           <li key={project.id}>
             <Link
               href={`${basePath}/${project.id}`}
-              className="grid gap-3 rounded-xl p-4 ring-1 ring-foreground/10 hover:bg-muted/40"
+              className="grid grid-cols-1 gap-3 rounded-xl p-4 ring-1 ring-foreground/10 hover:bg-muted/40"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">

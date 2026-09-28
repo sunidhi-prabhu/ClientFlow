@@ -3,11 +3,24 @@ import "server-only";
 import { PrismaPg } from "@prisma/adapter-pg";
 
 import { PrismaClient } from "@/generated/prisma/client";
-import { getServerEnv } from "@/lib/env";
+import { getServerEnv, type ServerEnv } from "@/lib/env";
+
+/** node-postgres pool settings for the application's connections. */
+export function databasePoolConfig(env: ServerEnv) {
+  return {
+    connectionString: env.DATABASE_URL,
+    max: env.DATABASE_POOL_MAX,
+    // node-postgres waits indefinitely by default: during a database outage
+    // every request would hang instead of failing (and the health check report it).
+    connectionTimeoutMillis: env.DATABASE_CONNECT_TIMEOUT_MS,
+    idleTimeoutMillis: 30_000,
+    statement_timeout: env.DATABASE_STATEMENT_TIMEOUT_MS,
+  };
+}
 
 function createPrismaClient() {
   const env = getServerEnv();
-  const adapter = new PrismaPg({ connectionString: env.DATABASE_URL });
+  const adapter = new PrismaPg(databasePoolConfig(env));
   return new PrismaClient({
     adapter,
     log: env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],

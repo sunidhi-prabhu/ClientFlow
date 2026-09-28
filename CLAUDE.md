@@ -52,7 +52,10 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
   (checked by `schema-invariants.test.ts`).
 - Roles (`OWNER` > `ADMIN` > `MANAGER` > `MEMBER`) live on `Membership`, not `User`.
   Authorization is enforced in the service layer via named permissions, not ad-hoc role comparisons or UI-only checks.
-- Mutations that need auditing write the `AuditLog` row in the same transaction.
+- Mutations that need auditing call `recordAudit(tx, ctx, { action, resourceId, metadata })`
+  (`src/server/audit/service.ts`) inside the same transaction. Add new actions to `AUDIT_ACTIONS` in
+  `src/lib/audit.ts`. Never write `AuditLog` rows from routes or actions, never put secrets in metadata
+  (it is sanitized, but don't rely on that), and never update or delete them (tenant client + trigger refuse).
 - New tenant-scoped features need tests that attempt cross-tenant access and insufficient-role access.
 
 ## Authentication, tenant context & RBAC
@@ -72,6 +75,10 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
 - Better Auth endpoints: review before enabling new ones and record the decision in docs/architecture.md
   ("Account-management endpoints"). `/change-password` always revokes other sessions (hook in `auth.ts`).
 - Rate limiting is in-memory: single instance only until shared storage is configured (docs §12).
+- Never call `getAuth().api.*` from a request path (it skips Better Auth's rate limiter, origin check and
+  `disabledPaths`): Server Actions use `callAuthEndpoint` (`src/server/auth/endpoint.ts`).
+- Production needs `AUTH_CLIENT_IP_HEADER` or `AUTH_TRUSTED_PROXIES`, a TLS `DATABASE_URL`, and the app connected as
+  the least-privilege role from `db/runtime-role.sql` (re-apply it after each migration).
 - `proxy.ts` is only a UX redirect + CSP nonce. It is not a security boundary.
 - Emails go through `dispatchEmail` (deferred with `after()`). Never log codes, links, tokens or email bodies.
 - Security headers: `src/lib/security/headers.ts`. Every page is dynamically rendered (CSP nonce); keep

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useRef } from "react";
 
 import { mainNavigation } from "@/config/navigation";
 import { hasPermission, type Role } from "@/lib/permissions";
@@ -26,6 +27,14 @@ export function NavLinks({
   role?: Role;
 }) {
   const pathname = usePathname();
+  const activeLink = useRef<HTMLAnchorElement>(null);
+
+  // The horizontal (phone) bar scrolls: keep the current page's item visible.
+  useEffect(() => {
+    if (orientation === "horizontal") {
+      activeLink.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    }
+  }, [orientation, pathname]);
 
   return (
     <ul
@@ -45,6 +54,7 @@ export function NavLinks({
             <li key={title}>
               <Link
                 href={`${basePath}${href}`}
+                ref={active ? activeLink : undefined}
                 aria-current={active ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors",

@@ -5,6 +5,7 @@ import {
   assertCanChangeRole,
   assertPermission,
   canChangeRole,
+  canRemoveMember,
   hasPermission,
   PERMISSIONS,
   permissionsFor,
@@ -133,5 +134,38 @@ describe("role changes (escalation rules)", () => {
         newRole: "OWNER",
       }),
     ).toThrow(ForbiddenError);
+  });
+});
+
+describe("audit log access", () => {
+  it("only OWNER and ADMIN can read the audit log", () => {
+    expect(ROLES.filter((role) => hasPermission(role, "audit:read")).sort()).toEqual([
+      "ADMIN",
+      "OWNER",
+    ]);
+  });
+});
+
+describe("canRemoveMember", () => {
+  const remove = (actorRole: Role, targetRole: Role, actorIsTarget = false) =>
+    canRemoveMember({ actorRole, targetRole, actorIsTarget });
+
+  it("requires member:remove", () => {
+    expect(remove("MANAGER", "MEMBER")).toBe(false);
+    expect(remove("MEMBER", "MEMBER")).toBe(false);
+  });
+
+  it("never removes oneself through this path", () => {
+    expect(remove("OWNER", "OWNER", true)).toBe(false);
+    expect(remove("ADMIN", "ADMIN", true)).toBe(false);
+  });
+
+  it("lets OWNER remove anyone and ADMIN only lower ranks", () => {
+    expect(remove("OWNER", "OWNER")).toBe(true);
+    expect(remove("OWNER", "ADMIN")).toBe(true);
+    expect(remove("ADMIN", "MANAGER")).toBe(true);
+    expect(remove("ADMIN", "MEMBER")).toBe(true);
+    expect(remove("ADMIN", "ADMIN")).toBe(false);
+    expect(remove("ADMIN", "OWNER")).toBe(false);
   });
 });

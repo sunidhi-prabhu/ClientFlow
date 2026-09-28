@@ -71,7 +71,7 @@ export default async function InvoicePage({
             </div>
             <p className="text-sm text-muted-foreground">{paymentStatusLabel(status)}</p>
           </div>
-          <div className="flex flex-col items-end gap-2">
+          <div className="flex flex-col items-start gap-2 sm:items-end">
             <InvoiceActions
               organizationSlug={slug}
               invoiceId={invoice.id}
@@ -86,7 +86,7 @@ export default async function InvoicePage({
                 cancel: cancelInvoiceAction,
               }}
             />
-            <div className="flex gap-2 print:hidden">
+            <div className="flex flex-wrap gap-2 print:hidden">
               {editable && (
                 <Link
                   href={`/o/${slug}/invoices/${invoice.id}/edit`}

@@ -14,9 +14,9 @@ import { type TenantDb } from "@/server/tenancy/tenant-db";
 /*
  * Organization dashboard. Every metric is computed in the database with
  * aggregate queries (count / groupBy / _sum) through the tenant-scoped client,
- * so it only ever sees the caller's organization. All queries are independent
- * and run concurrently in one batch; their number does not depend on how much
- * data the organization has (no N+1).
+ * so it only ever sees the caller's organization. The sections load
+ * concurrently; the number of queries does not depend on how much data the
+ * organization has (no N+1).
  *
  * Sections the caller's role may not read (e.g. invoices for MEMBER) are
  * returned as null and never queried.
@@ -55,6 +55,37 @@ const PROJECT_STATUSES: ProjectStatus[] = [
 const TASK_STATUSES: TaskStatus[] = ["TODO", "IN_PROGRESS", "REVIEW", "DONE"];
 
 const skip = Promise.resolve(null);
+
+/**
+ * The active projects due soonest, with their open (not done) task counts.
+ * Counting in the project query (`_count`) made PostgreSQL aggregate every task
+ * of the organization before picking 5 projects; counting afterwards touches
+ * only those projects' tasks. Two statements, both independent of data size.
+ */
+async function activeProjectsWithOpenTasks(db: TenantDb, countTasks: boolean) {
+  const projects = await db.project.findMany({
+    where: { status: "ACTIVE" },
+    orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { updatedAt: "desc" }, { id: "asc" }],
+    take: DASHBOARD_PROJECT_LIMIT,
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      progress: true,
+      dueDate: true,
+      client: { select: { id: true, name: true } },
+    },
+  });
+  if (!countTasks) return projects.map((project) => ({ ...project, openTasks: null }));
+  // Also issued with no projects, so the statement count never depends on the data.
+  const open = await db.task.groupBy({
+    by: ["projectId"],
+    where: { projectId: { in: projects.map((project) => project.id) }, status: { not: "DONE" } },
+    _count: { _all: true },
+  });
+  const counts = new Map(open.map((group) => [group.projectId, group._count._all]));
+  return projects.map((project) => ({ ...project, openTasks: counts.get(project.id) ?? 0 }));
+}
 
 export type Dashboard = Awaited<ReturnType<typeof getDashboard>>;
 
@@ -103,27 +134,7 @@ export async function getDashboard(db: TenantDb, role: MembershipRole, now = new
           where: { status: "ISSUED", dueDate: { lt: today } },
         })
       : skip,
-    can.projects
-      ? db.project.findMany({
-          where: { status: "ACTIVE" },
-          orderBy: [
-            { dueDate: { sort: "asc", nulls: "last" } },
-            { updatedAt: "desc" },
-            { id: "asc" },
-          ],
-          take: DASHBOARD_PROJECT_LIMIT,
-          select: {
-            id: true,
-            name: true,
-            status: true,
-            progress: true,
-            dueDate: true,
-            client: { select: { id: true, name: true } },
-            // Open tasks per project, counted in the same statement.
-            _count: { select: { tasks: { where: { status: { not: "DONE" } } } } },
-          },
-        })
-      : skip,
+    can.projects ? activeProjectsWithOpenTasks(db, can.tasks) : skip,
     can.projects
       ? db.projectActivity.findMany({
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -157,10 +168,7 @@ export async function getDashboard(db: TenantDb, role: MembershipRole, now = new
     projects = {
       byStatus,
       active: byStatus.ACTIVE,
-      activeProjects: (activeProjects ?? []).map(({ _count, ...project }) => ({
-        ...project,
-        openTasks: can.tasks ? _count.tasks : null,
-      })),
+      activeProjects: activeProjects ?? [],
     };
   }
 

@@ -4,12 +4,14 @@ import { z } from "zod";
 
 import { Prisma } from "@/generated/prisma/client";
 import { getDb } from "@/lib/db";
+import { permissionsFor } from "@/lib/permissions";
 import { ConflictError, ValidationError } from "@/lib/errors";
 import {
   organizationNameSchema,
   organizationSlugSchema,
   slugify,
 } from "@/lib/validation/organization";
+import { auditRecordData } from "@/server/audit/service";
 
 /**
  * Input accepted from the browser. Unknown keys (e.g. `userId`, `role`,
@@ -46,8 +48,28 @@ export async function createOrganization(userId: string, input: CreateOrganizati
         data: { name: input.name, slug: parsedSlug.data },
         select: { id: true, slug: true, name: true },
       });
-      await tx.membership.create({
+      const membership = await tx.membership.create({
         data: { organizationId: organization.id, userId, role: "OWNER" },
+        select: { id: true, user: { select: { name: true, email: true } } },
+      });
+      const audit = { organizationId: organization.id, actorUserId: userId };
+      await tx.auditLog.createMany({
+        data: [
+          auditRecordData(audit, {
+            action: "organization.created",
+            resourceId: organization.id,
+            metadata: { name: organization.name, slug: organization.slug },
+          }),
+          auditRecordData(audit, {
+            action: "member.added",
+            resourceId: membership.id,
+            metadata: {
+              member: { userId, ...membership.user },
+              role: "OWNER",
+              permissionsGranted: permissionsFor("OWNER"),
+            },
+          }),
+        ],
       });
       return organization;
     });
