@@ -16,6 +16,11 @@ function optionalText(max: number, label: string) {
     .transform((value) => (value ? value : null));
 }
 
+/** Phone numbers: digit count limits (E.164 allows at most 15 digits). */
+export const MIN_PHONE_DIGITS = 7;
+export const MAX_PHONE_DIGITS = 15;
+const PHONE_CHARACTERS = /^\+?[0-9().\-\s]*$/;
+
 /** Statuses a user can choose; ARCHIVED is set only by archiving. */
 export const EDITABLE_CLIENT_STATUSES = ["ACTIVE", "INACTIVE"] as const;
 
@@ -32,7 +37,15 @@ export const clientFieldsSchema = z.object({
     .string()
     .trim()
     .max(40, "Phone must be at most 40 characters")
-    .regex(/^[0-9+().\-\s]*$/, "Use digits, spaces and + ( ) - . only")
+    .regex(PHONE_CHARACTERS, "Use digits, spaces and ( ) - . only, with + only at the start")
+    // International format (E.164): at most 15 digits including the country
+    // code; fewer than 7 is not a dialable number. Formatting is not counted.
+    .refine((value) => {
+      // Only counted once the characters are valid (one message per problem).
+      if (value === "" || !PHONE_CHARACTERS.test(value)) return true;
+      const digits = value.replace(/\D/g, "").length;
+      return digits >= MIN_PHONE_DIGITS && digits <= MAX_PHONE_DIGITS;
+    }, `Enter ${MIN_PHONE_DIGITS}–${MAX_PHONE_DIGITS} digits, including the country code`)
     .optional()
     .transform((value) => (value ? value : null)),
   address: optionalText(500, "Address"),

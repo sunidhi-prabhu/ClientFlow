@@ -4,6 +4,11 @@ import { API_CONTENT_SECURITY_POLICY, staticSecurityHeaders } from "./src/lib/se
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  logging: {
+    // `next dev` otherwise prints every Server Action call with its arguments,
+    // i.e. passwords, verification codes and reset tokens from the auth forms.
+    serverFunctions: false,
+  },
   async headers() {
     return [
       {
