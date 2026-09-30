@@ -8,6 +8,8 @@ const valid = {
   AUTH_TRUSTED_PROXIES: "10.0.0.0/8",
   SMTP_URL: "smtps://user:pass@smtp.example.com:465",
   EMAIL_FROM: "ClientFlow <no-reply@clientflow.example>",
+  // Billing not configured (paid plans unavailable).
+  STRIPE_SECRET_KEY: "",
 };
 
 async function load() {
@@ -26,7 +28,10 @@ describe("validateConfigurationAtStartup", () => {
     for (const [key, value] of Object.entries(valid)) vi.stubEnv(key, value);
     const { validateConfigurationAtStartup, logger } = await load();
     expect(() => validateConfigurationAtStartup()).not.toThrow();
-    expect(logger.info).toHaveBeenCalledWith("Configuration validated", { nodeEnv: "production" });
+    expect(logger.info).toHaveBeenCalledWith("Configuration validated", {
+      nodeEnv: "production",
+      billing: "not configured",
+    });
   });
 
   it.each([
@@ -34,6 +39,7 @@ describe("validateConfigurationAtStartup", () => {
     ["client IP configuration", { AUTH_TRUSTED_PROXIES: "" }, /AUTH_TRUSTED_PROXIES/],
     ["email settings", { SMTP_URL: "" }, /SMTP_URL/],
     ["TLS to the database", { DATABASE_URL: "postgresql://a:b@db.internal:5432/x" }, /TLS/],
+    ["complete Stripe settings", { STRIPE_SECRET_KEY: "sk_live_abc123" }, /STRIPE_WEBHOOK_SECRET/],
   ])("refuses to start without valid %s", async (_label, override, message) => {
     for (const [key, value] of Object.entries({ ...valid, ...override })) vi.stubEnv(key, value);
     const { validateConfigurationAtStartup } = await load();

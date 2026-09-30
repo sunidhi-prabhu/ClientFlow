@@ -2,6 +2,7 @@ import { Plus } from "lucide-react";
 import { type Metadata } from "next";
 import Link from "next/link";
 
+import { PlanLimitNotice } from "@/components/billing/plan-limit-notice";
 import { ClientsEmptyState } from "@/components/clients/clients-empty-state";
 import { ClientsPagination } from "@/components/clients/clients-pagination";
 import { ClientsTable } from "@/components/clients/clients-table";
@@ -10,6 +11,7 @@ import { AccessDenied } from "@/components/layout/access-denied";
 import { buttonVariants } from "@/components/ui/button";
 import { hasPermission } from "@/lib/permissions";
 import { parseListClientsQuery } from "@/lib/validation/client";
+import { getUsage } from "@/server/billing/limits";
 import { listClients } from "@/server/clients/service";
 import { tenantPage } from "@/server/protected";
 
@@ -28,6 +30,10 @@ export default async function ClientsPage({
   const result = await listClients(access.db, query);
   const basePath = `/o/${access.ctx.organization.slug}/clients`;
   const canCreate = hasPermission(access.ctx.role, "client:create");
+  const usage = canCreate ? await getUsage(access.db, "clients") : null;
+  const billingPath = hasPermission(access.ctx.role, "billing:manage")
+    ? `/o/${access.ctx.organization.slug}/billing`
+    : undefined;
   const filtered = Boolean(query.q) || query.status !== "current";
   const listParams = { q: query.q, status: query.status, sort: query.sort };
 
@@ -48,6 +54,8 @@ export default async function ClientsPage({
           </Link>
         )}
       </div>
+
+      {usage && <PlanLimitNotice resource="clients" usage={usage} billingPath={billingPath} />}
 
       <ClientsToolbar
         basePath={basePath}

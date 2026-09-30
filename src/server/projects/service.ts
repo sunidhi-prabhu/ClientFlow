@@ -9,6 +9,7 @@ import {
   type ProjectFields,
 } from "@/lib/validation/project";
 import { recordAudit } from "@/server/audit/service";
+import { assertWithinPlanLimit } from "@/server/billing/limits";
 import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
@@ -165,6 +166,7 @@ async function applyChanges(
 export async function createProject(deps: Deps, input: ProjectFields) {
   const { ctx, db } = deps;
   return db.$transaction(async (tx) => {
+    await assertWithinPlanLimit(tx, ctx, "projects");
     if (input.clientId) await assertAssignableClient(tx, input.clientId);
     const project = await tx.project.create({
       data: { ...input, organizationId: ctx.organization.id },
@@ -233,6 +235,8 @@ export async function restoreProject(deps: Deps, id: string) {
   return deps.db.$transaction(async (tx) => {
     const existing = (await tx.project.findUnique({ where: { id } })) ?? notFound();
     if (existing.status !== "ARCHIVED") throw new ConflictError("This project is not archived");
+    // A restored project is active again, so it counts toward the plan limit.
+    await assertWithinPlanLimit(tx, deps.ctx, "projects", "restore");
     const status = existing.statusBeforeArchive ?? "ACTIVE";
     const { count } = await tx.project.updateMany({
       where: { id, status: "ARCHIVED" },

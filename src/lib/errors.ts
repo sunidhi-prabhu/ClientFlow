@@ -112,6 +112,19 @@ export class OwnerRequiredError extends ConflictError {
   }
 }
 
+/**
+ * Creating (or restoring) a client or project would exceed the organization's
+ * plan. Existing records stay fully usable; only additions are refused.
+ */
+export class PlanLimitError extends ConflictError {
+  constructor(
+    message: string,
+    details: { resource: "clients" | "projects"; limit: number; used: number },
+  ) {
+    super(message, { details: { reason: "plan_limit", ...details } });
+  }
+}
+
 export class RateLimitedError extends AppError {
   constructor(message = "Too many requests") {
     super("RATE_LIMITED", message, 429);

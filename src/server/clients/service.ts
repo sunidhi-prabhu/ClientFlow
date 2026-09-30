@@ -4,6 +4,7 @@ import { type ClientStatus } from "@/generated/prisma/enums";
 import { ConflictError, NotFoundError } from "@/lib/errors";
 import { type ClientFields, type ListClientsQuery } from "@/lib/validation/client";
 import { recordAudit } from "@/server/audit/service";
+import { assertWithinPlanLimit } from "@/server/billing/limits";
 import { escapeLikePattern } from "@/server/search";
 import { type TenantContext } from "@/server/tenancy/context";
 import { type TenantDb } from "@/server/tenancy/tenant-db";
@@ -50,6 +51,7 @@ export async function getClient(db: TenantDb, id: string) {
 
 export async function createClient({ ctx, db }: Deps, input: ClientFields) {
   return db.$transaction(async (tx) => {
+    await assertWithinPlanLimit(tx, ctx, "clients");
     const client = await tx.client.create({
       data: { ...input, organizationId: ctx.organization.id },
     });
@@ -118,6 +120,8 @@ async function setArchived({ ctx, db }: Deps, id: string, archive: boolean) {
     const isArchived = existing.status === "ARCHIVED";
     if (archive && isArchived) throw new ConflictError("This client is already archived");
     if (!archive && !isArchived) throw new ConflictError("This client is not archived");
+    // A restored client is active again, so it counts toward the plan limit.
+    if (!archive) await assertWithinPlanLimit(tx, ctx, "clients", "restore");
 
     const status: ClientStatus = archive ? "ARCHIVED" : "ACTIVE";
     // Compare-and-set on the status just read: a concurrent archive/restore wins, this one is a 409.

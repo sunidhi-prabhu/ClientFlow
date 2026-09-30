@@ -2,8 +2,11 @@ import { ArrowLeft } from "lucide-react";
 import { type Metadata } from "next";
 import Link from "next/link";
 
+import { PlanLimitNotice } from "@/components/billing/plan-limit-notice";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { ProjectForm } from "@/components/projects/project-form";
+import { hasPermission } from "@/lib/permissions";
+import { getUsage } from "@/server/billing/limits";
 import { listAssignableClients } from "@/server/projects/service";
 import { tenantPage } from "@/server/protected";
 
@@ -21,7 +24,11 @@ export default async function NewProjectPage({
     return <AccessDenied message="Your role can view projects but not create them." />;
 
   const slug = access.ctx.organization.slug;
-  const clients = await listAssignableClients(access.db);
+  const [clients, usage] = await Promise.all([
+    listAssignableClients(access.db),
+    getUsage(access.db, "projects"),
+  ]);
+  const canManageBilling = hasPermission(access.ctx.role, "billing:manage");
   // Preselect a client when coming from its page (?clientId=…); only if it is one of ours.
   const { clientId } = await searchParams;
   const preselected = clients.find((client) => client.id === clientId)?.id ?? null;
@@ -38,6 +45,11 @@ export default async function NewProjectPage({
         </Link>
         <h1 className="text-2xl font-semibold tracking-tight">New project</h1>
       </div>
+      <PlanLimitNotice
+        resource="projects"
+        usage={usage}
+        billingPath={canManageBilling ? `/o/${slug}/billing` : undefined}
+      />
       <ProjectForm
         organizationSlug={slug}
         action={createProjectAction}

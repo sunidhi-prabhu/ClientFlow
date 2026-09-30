@@ -1,6 +1,6 @@
 import "server-only";
 
-import { getAuthEnv, getEmailEnv, getServerEnv } from "@/lib/env";
+import { getAuthEnv, getBillingEnv, getEmailEnv, getServerEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
 /*
@@ -17,7 +17,11 @@ export function validateConfigurationAtStartup(): void {
   const server = getServerEnv();
   getAuthEnv();
   getEmailEnv();
-  logger.info("Configuration validated", { nodeEnv: server.NODE_ENV });
+  const billing = getBillingEnv();
+  logger.info("Configuration validated", {
+    nodeEnv: server.NODE_ENV,
+    billing: billing.STRIPE_SECRET_KEY ? "stripe" : "not configured",
+  });
 }
 
 /** Log why the configuration is invalid and stop the process (exit code 1). */

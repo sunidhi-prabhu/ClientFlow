@@ -146,6 +146,22 @@ describe("audit log access", () => {
   });
 });
 
+describe("billing access", () => {
+  it("only OWNER and ADMIN can see or change the organization's plan", () => {
+    for (const permission of ["billing:read", "billing:manage"] as const) {
+      expect(hasPermission("OWNER", permission)).toBe(true);
+      expect(hasPermission("ADMIN", permission)).toBe(true);
+      expect(hasPermission("MANAGER", permission)).toBe(false);
+      expect(hasPermission("MEMBER", permission)).toBe(false);
+    }
+  });
+
+  it("MANAGER keeps creating clients and projects (limits are enforced by plan, not role)", () => {
+    expect(hasPermission("MANAGER", "client:create")).toBe(true);
+    expect(hasPermission("MANAGER", "project:create")).toBe(true);
+  });
+});
+
 describe("canRemoveMember", () => {
   const remove = (actorRole: Role, targetRole: Role, actorIsTarget = false) =>
     canRemoveMember({ actorRole, targetRole, actorIsTarget });

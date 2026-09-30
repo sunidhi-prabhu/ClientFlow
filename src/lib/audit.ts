@@ -11,6 +11,7 @@ export const AUDIT_RESOURCE_TYPES = [
   "project",
   "task",
   "invoice",
+  "billing",
 ] as const;
 export type AuditResourceType = (typeof AUDIT_RESOURCE_TYPES)[number];
 
@@ -22,6 +23,7 @@ export const AUDIT_RESOURCE_LABELS: Record<AuditResourceType, string> = {
   project: "Project",
   task: "Task",
   invoice: "Invoice",
+  billing: "Billing",
 };
 
 /** Every audited action, with its label and the resource type it applies to. */
@@ -55,6 +57,18 @@ export const AUDIT_ACTIONS = {
   "invoice.issued": { label: "Invoice issued", resourceType: "invoice" },
   "invoice.paid": { label: "Invoice marked paid", resourceType: "invoice" },
   "invoice.cancelled": { label: "Invoice cancelled", resourceType: "invoice" },
+  "billing.checkout_started": { label: "Checkout started", resourceType: "billing" },
+  "billing.plan_change_requested": { label: "Plan change requested", resourceType: "billing" },
+  "billing.cancellation_requested": { label: "Cancellation requested", resourceType: "billing" },
+  "billing.cancellation_withdrawn": { label: "Cancellation withdrawn", resourceType: "billing" },
+  "billing.subscription_activated": { label: "Subscription activated", resourceType: "billing" },
+  "billing.plan_changed": { label: "Plan changed", resourceType: "billing" },
+  "billing.subscription_status_changed": {
+    label: "Subscription status changed",
+    resourceType: "billing",
+  },
+  "billing.subscription_cancelled": { label: "Subscription cancelled", resourceType: "billing" },
+  "billing.payment_failed": { label: "Payment failed", resourceType: "billing" },
 } as const satisfies Record<string, { label: string; resourceType: AuditResourceType }>;
 
 export type AuditAction = keyof typeof AUDIT_ACTIONS;

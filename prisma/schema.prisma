@@ -48,6 +48,7 @@ model Organization {
   invoices          Invoice[]
   invoiceItems      InvoiceItem[]
   auditLogs         AuditLog[]
+  subscription      Subscription?
 }
 
 enum MembershipRole {
@@ -510,4 +511,66 @@ model RateLimit {
   count       Int
   /// Milliseconds since the epoch.
   lastRequest BigInt
+}
+
+/// Pricing plans (limits and prices: src/lib/billing.ts). FREE needs no subscription.
+enum BillingPlan {
+  FREE
+  STARTER
+  GROWTH
+  PROFESSIONAL
+  AGENCY
+}
+
+enum BillingInterval {
+  MONTH
+  YEAR
+}
+
+/// Stripe subscription statuses (https://docs.stripe.com/api/subscriptions/object#subscription_object-status).
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  UNPAID
+  CANCELED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  PAUSED
+}
+
+/// Tenant-owned: the organization's billing state, one row per organization at
+/// most (no row = Free plan, never billed). Written from verified Stripe data
+/// only (src/server/billing/sync.ts); the entitlement (client/project limits)
+/// is derived from `plan` + `status`, never stored or taken from requests.
+/// Card details are never stored: Stripe holds them.
+model Subscription {
+  id                   String              @id @default(cuid())
+  organizationId       String              @unique
+  /// The plan paid for by the Stripe subscription (FREE when there is none).
+  plan                 BillingPlan         @default(FREE)
+  /// Null until Stripe reports a subscription.
+  status               SubscriptionStatus?
+  interval             BillingInterval?
+  stripeCustomerId     String?             @unique
+  stripeSubscriptionId String?             @unique
+  /// End of the paid period; with cancelAtPeriodEnd, when access ends.
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean             @default(false)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, id])
+}
+
+/// Stripe webhook events already applied (idempotency: Stripe delivers at least
+/// once). Global: an event is resolved to an organization only after its
+/// signature is verified, through the stored Stripe customer id.
+model StripeEvent {
+  /// Stripe event id (evt_…).
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
 }

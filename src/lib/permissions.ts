@@ -45,6 +45,10 @@ export const PERMISSIONS = [
   "report:read",
   // Audit log (security-sensitive: sign-ins, role changes, …). OWNER and ADMIN only.
   "audit:read",
+  // Billing: the plan, usage and subscription (read), and changing what the
+  // organization pays for (manage). OWNER and ADMIN only.
+  "billing:read",
+  "billing:manage",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

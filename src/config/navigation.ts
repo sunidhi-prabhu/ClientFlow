@@ -1,4 +1,5 @@
 import {
+  CreditCard,
   FolderKanban,
   LayoutDashboard,
   type LucideIcon,
@@ -28,4 +29,5 @@ export const mainNavigation: NavItem[] = [
   { title: "Projects", href: "/projects", icon: FolderKanban },
   { title: "Invoices", href: "/invoices", icon: Receipt, permission: "invoice:read" },
   { title: "Audit log", href: "/audit-log", icon: ScrollText, permission: "audit:read" },
+  { title: "Billing", href: "/billing", icon: CreditCard, permission: "billing:read" },
 ];

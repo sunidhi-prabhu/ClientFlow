@@ -142,3 +142,49 @@ describe("database connection settings", () => {
     });
   });
 });
+
+describe("getBillingEnv", () => {
+  beforeEach(async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    const { clearBillingEnv } = await import("../../tests/support/billing-env");
+    clearBillingEnv();
+  });
+
+  it("is optional: without Stripe variables billing is simply not configured", async () => {
+    const { getBillingEnv } = await loadEnv();
+    expect(getBillingEnv().STRIPE_SECRET_KEY).toBeUndefined();
+  });
+
+  it("accepts a complete test-mode configuration", async () => {
+    const { stubBillingEnv, TEST_BILLING_ENV } = await import("../../tests/support/billing-env");
+    stubBillingEnv();
+    const { getBillingEnv } = await loadEnv();
+    expect(getBillingEnv()).toMatchObject(TEST_BILLING_ENV);
+  });
+
+  it("refuses a partial configuration, naming what is missing", async () => {
+    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_abc");
+    const { getBillingEnv } = await loadEnv();
+    expect(() => getBillingEnv()).toThrow(/STRIPE_WEBHOOK_SECRET[\s\S]*STRIPE_PRICE_AGENCY_ANNUAL/);
+  });
+
+  it("refuses live keys outside production", async () => {
+    const { stubBillingEnv } = await import("../../tests/support/billing-env");
+    stubBillingEnv({ STRIPE_SECRET_KEY: "sk_live_abc123" });
+    const { getBillingEnv } = await loadEnv();
+    expect(() => getBillingEnv()).toThrow(/test-mode key/);
+  });
+
+  it("refuses malformed ids and the same Price for two plans", async () => {
+    const { stubBillingEnv } = await import("../../tests/support/billing-env");
+    stubBillingEnv({ STRIPE_PRICE_GROWTH_MONTHLY: "prod_123" });
+    let env = await loadEnv();
+    expect(() => env.getBillingEnv()).toThrow(
+      /STRIPE_PRICE_GROWTH_MONTHLY: must be a Stripe Price id/,
+    );
+
+    stubBillingEnv({ STRIPE_PRICE_GROWTH_MONTHLY: "price_startermonthly" });
+    env = await loadEnv();
+    expect(() => env.getBillingEnv()).toThrow(/its own Stripe Price id/);
+  });
+});

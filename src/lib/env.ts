@@ -172,3 +172,85 @@ export function getEmailEnv(): EmailEnv {
   cachedEmail ??= parseEnv(emailEnvSchema);
   return cachedEmail;
 }
+
+/** Stripe Price ids, one per paid plan and interval (created in the Stripe dashboard). */
+export const STRIPE_PRICE_ENV = {
+  STARTER: { MONTH: "STRIPE_PRICE_STARTER_MONTHLY", YEAR: "STRIPE_PRICE_STARTER_ANNUAL" },
+  GROWTH: { MONTH: "STRIPE_PRICE_GROWTH_MONTHLY", YEAR: "STRIPE_PRICE_GROWTH_ANNUAL" },
+  PROFESSIONAL: {
+    MONTH: "STRIPE_PRICE_PROFESSIONAL_MONTHLY",
+    YEAR: "STRIPE_PRICE_PROFESSIONAL_ANNUAL",
+  },
+  AGENCY: { MONTH: "STRIPE_PRICE_AGENCY_MONTHLY", YEAR: "STRIPE_PRICE_AGENCY_ANNUAL" },
+} as const;
+
+const STRIPE_PRICE_VARIABLES = Object.values(STRIPE_PRICE_ENV).flatMap((byInterval) =>
+  Object.values(byInterval),
+);
+
+const priceId = optionalString.pipe(
+  z
+    .string()
+    .regex(/^price_[A-Za-z0-9]+$/, "must be a Stripe Price id (price_…)")
+    .optional(),
+);
+
+const billingEnvSchema = z
+  .object({
+    NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+    STRIPE_SECRET_KEY: optionalString.pipe(
+      z
+        .string()
+        .regex(/^(sk|rk)_(test|live)_[A-Za-z0-9]+$/, "must be a Stripe secret or restricted key")
+        .optional(),
+    ),
+    STRIPE_WEBHOOK_SECRET: optionalString.pipe(
+      z
+        .string()
+        .regex(/^whsec_[A-Za-z0-9]+$/, "must be a Stripe webhook signing secret (whsec_…)")
+        .optional(),
+    ),
+    ...Object.fromEntries(STRIPE_PRICE_VARIABLES.map((name) => [name, priceId])),
+  })
+  .superRefine((env, context) => {
+    const values = env as Record<string, string | undefined>;
+    const required = ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", ...STRIPE_PRICE_VARIABLES];
+    const missing = required.filter((name) => !values[name]);
+    // Billing is optional: all Stripe variables, or none (paid plans unavailable).
+    if (missing.length > 0 && missing.length < required.length) {
+      for (const name of missing) {
+        context.addIssue({
+          code: "custom",
+          path: [name],
+          message:
+            "is required when Stripe billing is configured (set all Stripe variables or none)",
+        });
+      }
+    }
+    // Never charge real cards outside production.
+    if (env.NODE_ENV !== "production" && /^(sk|rk)_live_/.test(env.STRIPE_SECRET_KEY ?? "")) {
+      context.addIssue({
+        code: "custom",
+        path: ["STRIPE_SECRET_KEY"],
+        message: "must be a test-mode key (sk_test_…) outside production",
+      });
+    }
+    const prices = STRIPE_PRICE_VARIABLES.map((name) => values[name]).filter(Boolean);
+    if (new Set(prices).size !== prices.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["STRIPE_PRICE_STARTER_MONTHLY"],
+        message: "each plan and interval needs its own Stripe Price id",
+      });
+    }
+  });
+
+export type BillingEnv = z.infer<typeof billingEnvSchema>;
+
+let cachedBilling: BillingEnv | undefined;
+
+/** Stripe billing. `STRIPE_SECRET_KEY` is undefined when billing is not configured. */
+export function getBillingEnv(): BillingEnv {
+  cachedBilling ??= parseEnv(billingEnvSchema);
+  return cachedBilling;
+}

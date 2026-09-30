@@ -76,6 +76,10 @@ PostgreSQL, Prisma 7, Tailwind 4, shadcn/ui). Full rationale:
   trigger is the backstop, not the check. To transfer ownership, promote the new owner first.
 - Better Auth endpoints: review before enabling new ones and record the decision in docs/architecture.md
   ("Account-management endpoints"). `/change-password` always revokes other sessions (hook in `auth.ts`).
+- Billing (docs/architecture.md §6g): limits come only from `entitlementsFor` on the stored `Subscription`;
+  plan/status are written only by `src/server/billing/sync.ts` from verified Stripe data. Adding a client or
+  project (create **or restore**) calls `assertWithinPlanLimit` in the same transaction. Only
+  `src/server/billing/stripe.ts` imports the Stripe SDK. Never accept a price, plan limit or Stripe id from input.
 - Rate limiting is stored in PostgreSQL (`RateLimit`, Better Auth `storage: "database"`): shared by all instances.
 - Never call `getAuth().api.*` from a request path (it skips Better Auth's rate limiter, origin check and
   `disabledPaths`): Server Actions use `callAuthEndpoint` (`src/server/auth/endpoint.ts`).

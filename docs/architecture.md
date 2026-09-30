@@ -907,6 +907,55 @@ deployment step, see §12.)
   page, a summary of changes, and the full sanitized metadata on demand.
 - Queries use the `(organizationId, …, createdAt)` indexes.
 
+## 6g. Billing and plan limits
+
+**Plans** (`src/lib/billing.ts`, pure): Free 5/5, Starter 15/15 ($9/$90),
+Growth 50/50 ($19/$190), Professional 150/150 ($39/$390), Agency 500/500
+($79/$790) active clients/projects, monthly/annual. Billing belongs to the
+**organization**.
+
+**State** (`Subscription`, tenant-owned, at most one row per organization; no
+row = Free): plan, Stripe status, interval, Stripe customer/subscription ids,
+period end, cancel-at-period-end. A CHECK constraint refuses a paid plan
+without a Stripe subscription id. `StripeEvent` (global) stores processed
+webhook event ids. Limits are never stored: `entitlementsFor(plan, status)`
+derives them (paid plan while ACTIVE/TRIALING/PAST_DUE, otherwise Free).
+
+**Enforcement** (`src/server/billing/limits.ts`): `assertWithinPlanLimit` runs
+inside the create/restore transaction of clients and projects. It locks the
+organization row first (like invoice numbering), so concurrent additions are
+checked one after another, then counts non-archived records. Refusal is a
+`PlanLimitError` (409, `details.reason = "plan_limit"`). Restores are limited
+too (otherwise archive → create → restore bypasses the limit). Editing,
+archiving and reading are never limited; downgrades delete nothing.
+
+**Stripe** is isolated behind `BillingProvider` (`src/server/billing/provider.ts`;
+the only SDK import is `stripe.ts`). Tenant-side operations
+(`src/server/billing/service.ts`, `billing:manage` = OWNER/ADMIN via
+`tenantAction`): Checkout for a first subscription (Price looked up from the
+validated plan + interval; customer created once per organization with an
+idempotency key), plan changes (`pending_if_incomplete`: an upgrade applies
+only once paid), cancel/resume at period end, customer portal. None of them
+writes the plan.
+
+**Sync** (`src/server/billing/sync.ts`, raw-DB allowlist): the only writer of
+plan/status. Webhooks (`/api/billing/webhook`) are verified with the signing
+secret over the raw body, resolved to an organization only through a Stripe
+customer id ClientFlow created (and, for checkout, the matching
+`client_reference_id`), and applied by **re-reading the subscription from
+Stripe** (out-of-order deliveries cannot roll state back). The event id is
+inserted in the same transaction (idempotent; concurrent duplicates hit the
+primary key). The checkout return page re-reads its session from Stripe and
+applies it only if it belongs to the organization. Stripe-driven changes are
+audited without an actor (`billing.subscription_activated`, `plan_changed`,
+`subscription_status_changed`, `subscription_cancelled`, `payment_failed`);
+requests by members are audited with their actor (`billing.checkout_started`,
+`plan_change_requested`, `cancellation_requested`, `cancellation_withdrawn`).
+
+**UI:** public pricing on the landing page (monthly/annual toggle), the billing
+page (`/o/[orgSlug]/billing`, `billing:read`), and a limit notice on the
+client/project list and new pages once the limit is reached.
+
 ## 7. Error handling
 
 Implemented in `src/lib/errors.ts` and `src/lib/api/handle-error.ts`.
@@ -1065,3 +1114,5 @@ implemented yet (details and follow-ups per milestone in
   move; the dashboard's task counts are linear in tasks (index-only).
 - **RBAC granularity:** MEMBER can work on tasks in any project of the
   organization (`task:update` is organization-wide).
+- **Billing:** USD only, no taxes (Stripe Tax not enabled), no trials, coupons
+  or per-seat pricing; `StripeEvent` rows are not pruned automatically.

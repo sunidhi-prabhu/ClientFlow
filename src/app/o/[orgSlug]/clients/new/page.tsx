@@ -2,8 +2,11 @@ import { ArrowLeft } from "lucide-react";
 import { type Metadata } from "next";
 import Link from "next/link";
 
+import { PlanLimitNotice } from "@/components/billing/plan-limit-notice";
 import { ClientForm } from "@/components/clients/client-form";
 import { AccessDenied } from "@/components/layout/access-denied";
+import { hasPermission } from "@/lib/permissions";
+import { getUsage } from "@/server/billing/limits";
 import { tenantPage } from "@/server/protected";
 
 import { createClientAction } from "../actions";
@@ -16,6 +19,8 @@ export default async function NewClientPage({ params }: PageProps<"/o/[orgSlug]/
   if (!access.allowed)
     return <AccessDenied message="Your role can view clients but not add them." />;
   const slug = access.ctx.organization.slug;
+  const usage = await getUsage(access.db, "clients");
+  const canManageBilling = hasPermission(access.ctx.role, "billing:manage");
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -29,6 +34,11 @@ export default async function NewClientPage({ params }: PageProps<"/o/[orgSlug]/
         </Link>
         <h1 className="text-2xl font-semibold tracking-tight">New client</h1>
       </div>
+      <PlanLimitNotice
+        resource="clients"
+        usage={usage}
+        billingPath={canManageBilling ? `/o/${slug}/billing` : undefined}
+      />
       <ClientForm organizationSlug={slug} action={createClientAction} submitLabel="Create client" />
     </div>
   );

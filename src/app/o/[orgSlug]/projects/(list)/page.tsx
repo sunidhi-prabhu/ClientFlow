@@ -2,6 +2,7 @@ import { Plus } from "lucide-react";
 import { type Metadata } from "next";
 import Link from "next/link";
 
+import { PlanLimitNotice } from "@/components/billing/plan-limit-notice";
 import { AccessDenied } from "@/components/layout/access-denied";
 import { ProjectsEmptyState } from "@/components/projects/projects-empty-state";
 import { ProjectsTable } from "@/components/projects/projects-table";
@@ -11,6 +12,7 @@ import { ListPagination } from "@/components/shared/list-pagination";
 import { buttonVariants } from "@/components/ui/button";
 import { hasPermission } from "@/lib/permissions";
 import { parseListProjectsQuery } from "@/lib/validation/project";
+import { getUsage } from "@/server/billing/limits";
 import { listAssignableClients, listProjects } from "@/server/projects/service";
 import { tenantPage } from "@/server/protected";
 
@@ -32,6 +34,10 @@ export default async function ProjectsPage({
   ]);
   const basePath = `/o/${access.ctx.organization.slug}/projects`;
   const canCreate = hasPermission(access.ctx.role, "project:create");
+  const usage = canCreate ? await getUsage(access.db, "projects") : null;
+  const billingPath = hasPermission(access.ctx.role, "billing:manage")
+    ? `/o/${access.ctx.organization.slug}/billing`
+    : undefined;
   const filtered = Boolean(query.q) || Boolean(query.clientId) || query.status !== "current";
   const listParams = {
     q: query.q,
@@ -57,6 +63,8 @@ export default async function ProjectsPage({
           </Link>
         )}
       </div>
+
+      {usage && <PlanLimitNotice resource="projects" usage={usage} billingPath={billingPath} />}
 
       <ProjectsToolbar
         basePath={basePath}

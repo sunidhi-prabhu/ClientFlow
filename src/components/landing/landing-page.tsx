@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 
+import { PricingTable } from "@/components/billing/pricing-table";
 import { Logo } from "@/components/layout/logo";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -107,6 +108,12 @@ export function LandingPage() {
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-3 px-4 sm:px-6">
           <Logo />
           <nav aria-label="Account" className="flex items-center gap-1 sm:gap-2">
+            <Link
+              href="#pricing"
+              className={cn(buttonVariants({ variant: "ghost" }), "hidden sm:inline-flex")}
+            >
+              Pricing
+            </Link>
             <Link href="/sign-in" className={buttonVariants({ variant: "ghost" })}>
               Sign in
             </Link>
@@ -214,7 +221,29 @@ export function LandingPage() {
           </div>
         </section>
 
-        <section aria-labelledby="cta-heading" className="border-t bg-muted/40">
+        <section
+          id="pricing"
+          aria-labelledby="pricing-heading"
+          className="scroll-mt-14 border-t bg-muted/40"
+        >
+          <div className="mx-auto w-full max-w-6xl px-4 py-16 sm:px-6 sm:py-20">
+            <div className="mx-auto mb-10 max-w-2xl text-center">
+              <h2
+                id="pricing-heading"
+                className="text-2xl font-semibold tracking-tight sm:text-3xl"
+              >
+                Simple pricing that grows with you
+              </h2>
+              <p className="mt-3 text-muted-foreground">
+                Start free with 5 clients and 5 projects. Upgrade when you need more; downgrading
+                never deletes your work.
+              </p>
+            </div>
+            <PricingTable mode="public" />
+          </div>
+        </section>
+
+        <section aria-labelledby="cta-heading" className="border-t">
           <div className="mx-auto w-full max-w-6xl px-4 py-14 text-center sm:px-6">
             <h2 id="cta-heading" className="text-xl font-semibold tracking-tight sm:text-2xl">
               Ready to bring your work together?

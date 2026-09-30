@@ -3,7 +3,13 @@ import { afterAll, beforeEach, vi } from "vitest";
 import { getDb } from "@/lib/db";
 import { type EmailMessage } from "@/server/email/mailer";
 
+import { TEST_BILLING_ENV } from "../support/billing-config";
 import { outbox } from "./support/outbox";
+
+// Stripe test-mode configuration with fake ids (independent of the developer's
+// .env). Billing tests replace the provider with an in-memory fake, so no
+// request ever reaches Stripe.
+Object.assign(process.env, TEST_BILLING_ENV);
 
 // Capture outgoing email instead of sending it (every integration test file).
 vi.mock("@/server/email/mailer", async () => {
