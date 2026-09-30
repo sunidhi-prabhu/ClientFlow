@@ -28,24 +28,24 @@ limit (or use a pooler such as PgBouncer in transaction mode).
 
 All variables are validated in `src/lib/env.ts` (see `.env.example`).
 
-| Variable                                                           | Production value                                                                                                         |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `DATABASE_URL`                                                     | The **runtime role** (`clientflow_app`, section 4) with `sslmode=verify-full` (TLS is required for non-local databases). |
-| `DATABASE_POOL_MAX`                                                | Connections per instance (default 10).                                                                                   |
-| `DATABASE_CONNECT_TIMEOUT_MS`                                      | Default 10000.                                                                                                           |
-| `DATABASE_STATEMENT_TIMEOUT_MS`                                    | Default 30000.                                                                                                           |
-| `BETTER_AUTH_SECRET`                                               | ≥ 32 random characters (`openssl rand -base64 32`), from the secret manager.                                             |
-| `BETTER_AUTH_URL`                                                  | The public `https://` origin.                                                                                            |
-| `AUTH_CLIENT_IP_HEADER` **or** `AUTH_TRUSTED_PROXIES`              | Required in production (section 1).                                                                                      |
-| `SMTP_URL`, `EMAIL_FROM`                                           | Provider credentials (`smtps://`). Timeouts are added automatically unless set in the URL.                               |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`                         | Optional; both or neither.                                                                                               |
-| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*` (8) | Optional billing (section 8): all or none. Live keys (`sk_live_`) only in production.                                    |
-| `LOG_LEVEL`                                                        | `info`.                                                                                                                  |
+| Variable                                                                                   | Production value                                                                                                         |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`                                                                             | The **runtime role** (`clientflow_app`, section 4) with `sslmode=verify-full` (TLS is required for non-local databases). |
+| `DATABASE_POOL_MAX`                                                                        | Connections per instance (default 10).                                                                                   |
+| `DATABASE_CONNECT_TIMEOUT_MS`                                                              | Default 10000.                                                                                                           |
+| `DATABASE_STATEMENT_TIMEOUT_MS`                                                            | Default 30000.                                                                                                           |
+| `BETTER_AUTH_SECRET`                                                                       | ≥ 32 random characters (`openssl rand -base64 32`), from the secret manager.                                             |
+| `BETTER_AUTH_URL`                                                                          | The public `https://` origin.                                                                                            |
+| `AUTH_CLIENT_IP_HEADER` **or** `AUTH_TRUSTED_PROXIES`                                      | Required in production (section 1).                                                                                      |
+| `SMTP_URL`, `EMAIL_FROM`                                                                   | Provider credentials (`smtps://`). Timeouts are added automatically unless set in the URL.                               |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`                                                 | Optional; both or neither.                                                                                               |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_PLAN_*` (8) | Optional billing (section 8): all or none. Live keys (`rzp_live_`) only in production.                                   |
+| `LOG_LEVEL`                                                                                | `info`.                                                                                                                  |
 
 Never set `AUTH_RATE_LIMIT` (tests only; it can only turn rate limiting on).
 
 **Secrets** (`BETTER_AUTH_SECRET`, database and SMTP passwords, Google secret,
-Stripe secret key and webhook secret)
+Razorpay key secret and webhook secret)
 live in the platform's secret manager, never in the repository or image
 (`.env*` files are git-ignored; only `.env.example` is tracked). No secret is
 exposed to the browser: the app has no `NEXT_PUBLIC_*` variables and all
@@ -156,52 +156,70 @@ Logs are JSON lines with `level`, `time`, `msg` and context. Alert on:
 Error tracking: the `onRequestError` hook in `src/instrumentation.ts` is the
 place to forward errors to a tracker (e.g. Sentry) when one is chosen.
 
-## 8. Billing (Stripe)
+## 8. Billing (Razorpay)
 
-Billing is optional: without the Stripe variables every organization stays on
-Free and the billing page says paid plans are unavailable. To enable it:
+Billing is optional: without the Razorpay variables every organization stays
+on Free and the billing page says paid plans are unavailable. Plans are priced
+in **USD**, so customers pay by **card** (Razorpay supports international
+currencies for subscriptions on cards only; UPI and eMandate are INR-only).
+To enable it:
 
-1. **Stripe account.** Use **test mode** until real payments are intended
-   (outside production the app only accepts `sk_test_` keys). Payouts go to
-   the bank account connected in Stripe (Settings → Payouts).
-2. **Products and prices.** Create one product per paid plan (Starter, Growth,
-   Professional, Agency), each with two **recurring** USD prices: monthly
-   ($9, $19, $39, $79) and yearly ($90, $190, $390, $790). Copy the eight
-   `price_…` ids into the `STRIPE_PRICE_*` variables. The app never accepts a
-   price from the browser; an unknown price on a subscription grants nothing.
-3. **Payment methods.** Settings → Payment methods: enable the methods to offer
-   (cards, wallets, bank debits that support recurring payments). Checkout
-   shows what is enabled there; card details never reach ClientFlow.
-4. **Customer portal.** Settings → Billing → Customer portal: activate it
-   (payment method updates, invoice history; plan changes and cancellation
-   are done in ClientFlow).
-5. **Webhook endpoint.** Developers → Webhooks → Add endpoint:
-   `https://<your domain>/api/billing/webhook`, events
-   `checkout.session.completed`, `customer.subscription.created`,
-   `customer.subscription.updated`, `customer.subscription.deleted`,
-   `customer.subscription.paused`, `customer.subscription.resumed`,
-   `invoice.paid`, `invoice.payment_failed`. Put its signing secret in
-   `STRIPE_WEBHOOK_SECRET`.
-   Locally: `stripe listen --forward-to localhost:3000/api/billing/webhook`
-   prints a `whsec_…` secret for development.
-6. **Restricted key (recommended).** Instead of the secret key, a restricted
-   key (`rk_…`) with write access to Customers, Checkout Sessions,
-   Subscriptions and Customer portal sessions.
-7. Deploy, then re-apply `db/runtime-role.sql` (new tables `Subscription`,
-   `StripeEvent`).
+1. **Razorpay account** at https://dashboard.razorpay.com. Test mode works
+   right after sign-up; live mode needs KYC (business details, bank account),
+   and payouts go to that Indian bank account.
+2. **International payments.** Account & Settings → International payments:
+   request activation (needed for USD; test mode may also require it).
+3. **API keys.** Account & Settings → API Keys → Generate test key: put the key
+   id (`rzp_test_…`) and secret in `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET`.
+   Outside production the app only accepts test keys.
+4. **Plans.** `npm run billing:setup-plans` creates the 8 USD plans (monthly and
+   yearly for Starter $9/$90, Growth $19/$190, Professional $39/$390, Agency
+   $79/$790) and prints the `RAZORPAY_PLAN_*` lines. Safe to re-run. Before each
+   checkout ClientFlow re-checks the plan's amount, currency and period against
+   `src/lib/billing.ts` and refuses to charge a mismatch.
+5. **Webhook.** Account & Settings → Webhooks → Add: URL
+   `https://<your domain>/api/billing/webhook`, a secret of your choice (≥ 16
+   characters, also in `RAZORPAY_WEBHOOK_SECRET`), events
+   `subscription.authenticated`, `subscription.activated`,
+   `subscription.charged`, `subscription.pending`, `subscription.halted`,
+   `subscription.cancelled`, `subscription.completed`, `subscription.paused`,
+   `subscription.resumed`, `subscription.updated`. Razorpay cannot reach
+   `localhost`: locally the billing page re-reads the subscription on each
+   visit instead (or use a tunnel such as `cloudflared` to test webhooks).
+6. Deploy, then re-apply `db/runtime-role.sql` (tables `Subscription`,
+   `BillingEvent`).
+
+**GST.** Every paid plan is charged its price plus 18% GST (`GST_RATE_BPS` in
+`src/lib/billing.ts`): $9 → $10.62, $19 → $22.42, $39 → $46.02, $79 → $93.22
+per month (yearly $106.20 / $224.20 / $460.20 / $932.20). The pricing page shows
+"+ 18% GST" and each payment step shows price, GST and total; the Razorpay plans
+are created with the GST-inclusive total. GST may only be charged once the
+business is GST-registered: set `gstin` in `src/config/business.ts` (shown on
+the policy pages) and confirm the treatment with an accountant before going live.
+
+**Policy pages** (`/terms`, `/privacy`, `/refunds`, `/delivery`, `/contact`,
+linked from the landing page footer) are what Razorpay's website review checks.
+Business details live in `src/config/business.ts`; update `policiesUpdated`
+whenever the text changes, and have the text reviewed before going live.
 
 **Behavior to know:**
 
-- The plan changes only from verified Stripe data (webhook, or the checkout
-  return page re-reading the session from Stripe). Redirect URLs grant nothing.
-- `PAST_DUE` keeps the paid plan while Stripe retries the payment; `UNPAID`,
-  `CANCELED`, `INCOMPLETE*` and `PAUSED` fall back to Free limits. Nothing is
-  ever deleted: over-limit organizations keep using their records and only
-  new clients/projects (and restores) are refused. Configure Stripe's retry
-  schedule and final action (Settings → Billing → Subscriptions and emails).
-- Webhook failures return 500 and Stripe retries for up to three days; watch
-  for "Stripe webhook rejected" (bad signature) and "unknown Price" errors in
-  the logs. Each processed event id is stored in `StripeEvent` (prunable after
-  30 days).
-- Test cards: `4242 4242 4242 4242` (succeeds), `4000 0000 0000 0341`
-  (attaches, then fails on charge); any future date and CVC.
+- Checkout creates the subscription on the server and opens Razorpay's hosted
+  payment page in a new tab. The plan changes only from subscription data read
+  back from Razorpay (webhook, or the billing page re-reading the
+  organization's own stored subscription); nothing in a URL grants anything.
+- Upgrades apply immediately (Razorpay `schedule_change_at: now`); downgrades
+  and annual → monthly apply at the end of the billing period. Cancelling
+  (downgrade to Free) happens at the end of the period and **cannot be undone**
+  at Razorpay; the organization can subscribe again afterwards.
+- `pending` (a charge failed, Razorpay retries) keeps the paid plan; `halted`,
+  `cancelled`, `completed`, `expired` and `paused` fall back to Free limits.
+  Nothing is ever deleted: over-limit organizations keep using their records and
+  only new clients/projects (and restores) are refused.
+- Webhook failures return 500 and Razorpay retries; watch for "Billing webhook
+  rejected" (bad signature) and "unknown provider plan" / "does not match the
+  published price" errors in the logs. Processed event ids are stored in
+  `BillingEvent` (prunable after 30 days).
+- Test cards (test mode): Mastercard `5104 0155 5555 5558` (international,
+  recurring), any future expiry and CVV; simulate a failed renewal from the
+  subscription's page in the dashboard.

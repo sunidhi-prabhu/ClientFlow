@@ -3,10 +3,10 @@ import {
   type BillingPlan,
   type SubscriptionStatus,
 } from "@/generated/prisma/enums";
-import { formatMoney } from "@/lib/money";
+import { formatMoney, percentOfCents } from "@/lib/money";
 
 /*
- * Plans, prices and entitlements. Pure (no database, no Stripe) so the server
+ * Plans, prices and entitlements. Pure (no database, no payment provider) so the server
  * (limit checks, checkout), the pricing UI and the tests share one definition.
  * The server derives an organization's limits from its stored plan and
  * subscription status with `entitlementsFor`; limits are never read from a
@@ -93,8 +93,23 @@ export function planRank(plan: BillingPlan): number {
 }
 
 /**
+ * When a change of an existing subscription takes effect: upgrades (and
+ * monthly → annual) now, downgrades (and annual → monthly) at the end of the
+ * paid period.
+ */
+export function planChangeTiming(
+  from: { plan: BillingPlan; interval: BillingInterval | null },
+  to: { plan: PaidPlan; interval: BillingInterval },
+): "now" | "cycle_end" {
+  if (planRank(to.plan) !== planRank(from.plan)) {
+    return planRank(to.plan) > planRank(from.plan) ? "now" : "cycle_end";
+  }
+  return to.interval === "YEAR" ? "now" : "cycle_end";
+}
+
+/**
  * Subscription statuses in which the paid plan applies. PAST_DUE keeps it
- * while Stripe retries the payment (smart retries / dunning); UNPAID,
+ * while the payment provider retries the charge; UNPAID,
  * CANCELED, INCOMPLETE, INCOMPLETE_EXPIRED and PAUSED fall back to Free.
  * Falling back never removes data: it only stops new creations above the
  * Free limits.
@@ -166,6 +181,27 @@ export function formatPlanPrice(plan: BillingPlan, interval: BillingInterval): s
   if (cents === 0) return "$0";
   const amount = formatMoney(cents, "USD").replace(/\.00$/, "");
   return `${amount}${INTERVAL_SUFFIX[interval]}`;
+}
+
+/**
+ * GST added on top of every plan price (18%, in basis points). The published
+ * prices ($9, $19, …) exclude it; customers are charged price + GST, and the
+ * provider plans are created with that GST-inclusive total.
+ */
+export const GST_RATE_BPS = 1_800;
+
+export type PriceBreakdown = { priceCents: number; taxCents: number; totalCents: number };
+
+/** Price, GST and total in cents for one billing period (integer math, half-up). */
+export function priceBreakdown(plan: BillingPlan, interval: BillingInterval): PriceBreakdown {
+  const priceCents = PLANS[plan].priceCents[interval];
+  const taxCents = percentOfCents(priceCents, GST_RATE_BPS);
+  return { priceCents, taxCents, totalCents: priceCents + taxCents };
+}
+
+/** "$9.00", "$10.62". */
+export function formatUsd(cents: number): string {
+  return formatMoney(cents, "USD");
 }
 
 /** What paying yearly saves compared with twelve monthly payments, in cents. */

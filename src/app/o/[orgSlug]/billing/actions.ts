@@ -1,39 +1,27 @@
 "use server";
 
 import { noInput, paidPlanInput } from "@/lib/validation/billing";
-import {
-  cancelSubscription,
-  changePlan,
-  openBillingPortal,
-  resumeSubscription,
-  startCheckout,
-} from "@/server/billing/service";
+import { cancelSubscription, changePlan, startCheckout } from "@/server/billing/service";
 import { tenantAction } from "@/server/protected";
 
 /*
  * Billing Server Actions: the standard pipeline (session → tenant context →
  * permission → validation) with `billing:manage` (OWNER and ADMIN). The input
- * is only the plan and interval; the Stripe Price, the organization and the
+ * is only the plan and interval; the provider plan, the organization and the
  * resulting limits are all resolved on the server. Nothing here changes the
- * plan directly: Stripe does, and verified Stripe data is stored by
- * src/server/billing/sync.ts.
+ * plan directly: the payment provider does, and src/server/billing/sync.ts
+ * stores what the provider reports.
  */
 
-/** Returns the Stripe Checkout URL to send the browser to. */
+/** Returns the provider's payment page for a first paid plan. */
 export const startCheckoutAction = tenantAction(
   { permission: "billing:manage", input: paidPlanInput },
-  async ({ ctx, db, input }) => {
-    const { url } = await startCheckout({ ctx, db }, input);
-    return { url };
-  },
+  async ({ ctx, db, input }) => startCheckout({ ctx, db }, input),
 );
 
 export const changePlanAction = tenantAction(
   { permission: "billing:manage", input: paidPlanInput },
-  async ({ ctx, db, input }) => {
-    await changePlan({ ctx, db }, input);
-    return null;
-  },
+  async ({ ctx, db, input }) => changePlan({ ctx, db }, input),
 );
 
 export const cancelSubscriptionAction = tenantAction(
@@ -42,18 +30,4 @@ export const cancelSubscriptionAction = tenantAction(
     await cancelSubscription({ ctx, db });
     return null;
   },
-);
-
-export const resumeSubscriptionAction = tenantAction(
-  { permission: "billing:manage", input: noInput },
-  async ({ ctx, db }) => {
-    await resumeSubscription({ ctx, db });
-    return null;
-  },
-);
-
-/** Returns the Stripe customer portal URL (payment method, invoices). */
-export const openBillingPortalAction = tenantAction(
-  { permission: "billing:manage", input: noInput },
-  async ({ ctx, db }) => openBillingPortal({ ctx, db }),
 );

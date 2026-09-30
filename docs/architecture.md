@@ -915,11 +915,12 @@ Growth 50/50 ($19/$190), Professional 150/150 ($39/$390), Agency 500/500
 **organization**.
 
 **State** (`Subscription`, tenant-owned, at most one row per organization; no
-row = Free): plan, Stripe status, interval, Stripe customer/subscription ids,
-period end, cancel-at-period-end. A CHECK constraint refuses a paid plan
-without a Stripe subscription id. `StripeEvent` (global) stores processed
-webhook event ids. Limits are never stored: `entitlementsFor(plan, status)`
-derives them (paid plan while ACTIVE/TRIALING/PAST_DUE, otherwise Free).
+row = Free): plan, provider status, interval, the provider subscription id,
+period end, cancel-at-period-end and a scheduled-change flag. A CHECK
+constraint refuses a paid plan without a provider subscription id.
+`BillingEvent` (global) stores processed webhook event ids. Limits are never
+stored: `entitlementsFor(plan, status)` derives them (paid plan while
+ACTIVE/TRIALING/PAST_DUE, otherwise Free).
 
 **Enforcement** (`src/server/billing/limits.ts`): `assertWithinPlanLimit` runs
 inside the create/restore transaction of clients and projects. It locks the
@@ -929,28 +930,39 @@ checked one after another, then counts non-archived records. Refusal is a
 too (otherwise archive → create → restore bypasses the limit). Editing,
 archiving and reading are never limited; downgrades delete nothing.
 
-**Stripe** is isolated behind `BillingProvider` (`src/server/billing/provider.ts`;
-the only SDK import is `stripe.ts`). Tenant-side operations
+**Provider: Razorpay** (Stripe does not onboard Indian businesses openly),
+isolated behind `BillingProvider` (`src/server/billing/provider.ts`; the only
+module calling Razorpay is `razorpay.ts`, REST over `fetch`, no SDK). Plans are
+USD, so subscriptions are card-only. Tenant-side operations
 (`src/server/billing/service.ts`, `billing:manage` = OWNER/ADMIN via
-`tenantAction`): Checkout for a first subscription (Price looked up from the
-validated plan + interval; customer created once per organization with an
-idempotency key), plan changes (`pending_if_incomplete`: an upgrade applies
-only once paid), cancel/resume at period end, customer portal. None of them
-writes the plan.
+`tenantAction`): checkout creates a subscription on the provider plan looked up
+from the validated plan + interval (after re-checking the plan's amount,
+currency and period against `src/lib/billing.ts`) and returns Razorpay's hosted
+payment page; an unpaid earlier checkout is cancelled and replaced. Plan changes
+apply now for upgrades and at period end for downgrades; cancellation is at
+period end and final. None of them writes the plan.
 
 **Sync** (`src/server/billing/sync.ts`, raw-DB allowlist): the only writer of
-plan/status. Webhooks (`/api/billing/webhook`) are verified with the signing
-secret over the raw body, resolved to an organization only through a Stripe
-customer id ClientFlow created (and, for checkout, the matching
-`client_reference_id`), and applied by **re-reading the subscription from
-Stripe** (out-of-order deliveries cannot roll state back). The event id is
-inserted in the same transaction (idempotent; concurrent duplicates hit the
-primary key). The checkout return page re-reads its session from Stripe and
-applies it only if it belongs to the organization. Stripe-driven changes are
-audited without an actor (`billing.subscription_activated`, `plan_changed`,
+plan/status. Webhooks (`/api/billing/webhook`) are verified (HMAC-SHA256 of the
+raw body, `X-Razorpay-Signature`, constant-time compare), resolved to an
+organization only through the subscription id ClientFlow stored when it created
+that subscription (and its `notes.organizationId` must agree), and applied by
+**re-reading the subscription from Razorpay** (out-of-order deliveries cannot
+roll state back). The event id (`x-razorpay-event-id`) is inserted in the same
+transaction (idempotent; concurrent duplicates hit the primary key). The
+billing page also re-reads the organization's own stored subscription on each
+visit (works without webhooks, e.g. locally); no URL parameter is trusted.
+Provider-driven changes are audited without an actor
+(`billing.subscription_activated`, `plan_changed`,
 `subscription_status_changed`, `subscription_cancelled`, `payment_failed`);
-requests by members are audited with their actor (`billing.checkout_started`,
-`plan_change_requested`, `cancellation_requested`, `cancellation_withdrawn`).
+requests by members with their actor (`billing.checkout_started`,
+`plan_change_requested`, `cancellation_requested`).
+
+**GST:** plan prices exclude tax; `priceBreakdown` adds 18% (`GST_RATE_BPS`,
+integer half-up via `src/lib/money.ts`). Customers are charged the total; the
+provider plans hold that total and are re-checked against it before checkout.
+Public policy pages live in `src/app/(legal)/` with business details from
+`src/config/business.ts`.
 
 **UI:** public pricing on the landing page (monthly/annual toggle), the billing
 page (`/o/[orgSlug]/billing`, `billing:read`), and a limit notice on the
@@ -1114,5 +1126,8 @@ implemented yet (details and follow-ups per milestone in
   move; the dashboard's task counts are linear in tasks (index-only).
 - **RBAC granularity:** MEMBER can work on tasks in any project of the
   organization (`task:update` is organization-wide).
-- **Billing:** USD only, no taxes (Stripe Tax not enabled), no trials, coupons
-  or per-seat pricing; `StripeEvent` rows are not pruned automatically.
+- **Billing:** USD only (cards; no UPI), a flat 18% GST for every customer (no GST
+  invoices, no zero-rating for exports), no
+  trials, coupons or per-seat pricing; no customer portal (payment method
+  changes happen on Razorpay's side); a scheduled cancellation cannot be
+  withdrawn; `BillingEvent` rows are not pruned automatically.

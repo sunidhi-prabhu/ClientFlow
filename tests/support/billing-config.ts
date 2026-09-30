@@ -1,13 +1,14 @@
-/** Stripe test-mode configuration for tests (fake ids: nothing here reaches Stripe). */
+/** Razorpay test-mode configuration for tests (fake ids: nothing here reaches Razorpay). */
 export const TEST_BILLING_ENV = {
-  STRIPE_SECRET_KEY: "sk_test_clientflowtests",
-  STRIPE_WEBHOOK_SECRET: "whsec_clientflowtests",
-  STRIPE_PRICE_STARTER_MONTHLY: "price_startermonthly",
-  STRIPE_PRICE_STARTER_ANNUAL: "price_starterannual",
-  STRIPE_PRICE_GROWTH_MONTHLY: "price_growthmonthly",
-  STRIPE_PRICE_GROWTH_ANNUAL: "price_growthannual",
-  STRIPE_PRICE_PROFESSIONAL_MONTHLY: "price_professionalmonthly",
-  STRIPE_PRICE_PROFESSIONAL_ANNUAL: "price_professionalannual",
-  STRIPE_PRICE_AGENCY_MONTHLY: "price_agencymonthly",
-  STRIPE_PRICE_AGENCY_ANNUAL: "price_agencyannual",
+  RAZORPAY_KEY_ID: "rzp_test_clientflowtests",
+  RAZORPAY_KEY_SECRET: "clientflow-test-key-secret",
+  RAZORPAY_WEBHOOK_SECRET: "clientflow-test-webhook-secret",
+  RAZORPAY_PLAN_STARTER_MONTHLY: "plan_startermonthly",
+  RAZORPAY_PLAN_STARTER_ANNUAL: "plan_starterannual",
+  RAZORPAY_PLAN_GROWTH_MONTHLY: "plan_growthmonthly",
+  RAZORPAY_PLAN_GROWTH_ANNUAL: "plan_growthannual",
+  RAZORPAY_PLAN_PROFESSIONAL_MONTHLY: "plan_professionalmonthly",
+  RAZORPAY_PLAN_PROFESSIONAL_ANNUAL: "plan_professionalannual",
+  RAZORPAY_PLAN_AGENCY_MONTHLY: "plan_agencymonthly",
+  RAZORPAY_PLAN_AGENCY_ANNUAL: "plan_agencyannual",
 } as const;

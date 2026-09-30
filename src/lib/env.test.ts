@@ -150,9 +150,9 @@ describe("getBillingEnv", () => {
     clearBillingEnv();
   });
 
-  it("is optional: without Stripe variables billing is simply not configured", async () => {
+  it("is optional: without Razorpay variables billing is simply not configured", async () => {
     const { getBillingEnv } = await loadEnv();
-    expect(getBillingEnv().STRIPE_SECRET_KEY).toBeUndefined();
+    expect(getBillingEnv().RAZORPAY_KEY_ID).toBeUndefined();
   });
 
   it("accepts a complete test-mode configuration", async () => {
@@ -163,28 +163,42 @@ describe("getBillingEnv", () => {
   });
 
   it("refuses a partial configuration, naming what is missing", async () => {
-    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_abc");
+    vi.stubEnv("RAZORPAY_KEY_ID", "rzp_test_abc123");
     const { getBillingEnv } = await loadEnv();
-    expect(() => getBillingEnv()).toThrow(/STRIPE_WEBHOOK_SECRET[\s\S]*STRIPE_PRICE_AGENCY_ANNUAL/);
+    expect(() => getBillingEnv()).toThrow(
+      /RAZORPAY_KEY_SECRET[\s\S]*RAZORPAY_WEBHOOK_SECRET[\s\S]*RAZORPAY_PLAN_AGENCY_ANNUAL/,
+    );
   });
 
   it("refuses live keys outside production", async () => {
     const { stubBillingEnv } = await import("../../tests/support/billing-env");
-    stubBillingEnv({ STRIPE_SECRET_KEY: "sk_live_abc123" });
+    stubBillingEnv({ RAZORPAY_KEY_ID: "rzp_live_abc123" });
     const { getBillingEnv } = await loadEnv();
     expect(() => getBillingEnv()).toThrow(/test-mode key/);
   });
 
-  it("refuses malformed ids and the same Price for two plans", async () => {
+  it("accepts live keys in production", async () => {
     const { stubBillingEnv } = await import("../../tests/support/billing-env");
-    stubBillingEnv({ STRIPE_PRICE_GROWTH_MONTHLY: "prod_123" });
+    stubBillingEnv({ RAZORPAY_KEY_ID: "rzp_live_abc123" });
+    vi.stubEnv("NODE_ENV", "production");
+    const { getBillingEnv } = await loadEnv();
+    expect(getBillingEnv().RAZORPAY_KEY_ID).toBe("rzp_live_abc123");
+  });
+
+  it("refuses malformed ids, a short webhook secret and the same plan for two prices", async () => {
+    const { stubBillingEnv } = await import("../../tests/support/billing-env");
+    stubBillingEnv({ RAZORPAY_PLAN_GROWTH_MONTHLY: "price_123" });
     let env = await loadEnv();
     expect(() => env.getBillingEnv()).toThrow(
-      /STRIPE_PRICE_GROWTH_MONTHLY: must be a Stripe Price id/,
+      /RAZORPAY_PLAN_GROWTH_MONTHLY: must be a Razorpay plan id/,
     );
 
-    stubBillingEnv({ STRIPE_PRICE_GROWTH_MONTHLY: "price_startermonthly" });
+    stubBillingEnv({ RAZORPAY_WEBHOOK_SECRET: "short" });
     env = await loadEnv();
-    expect(() => env.getBillingEnv()).toThrow(/its own Stripe Price id/);
+    expect(() => env.getBillingEnv()).toThrow(/RAZORPAY_WEBHOOK_SECRET: use at least 16/);
+
+    stubBillingEnv({ RAZORPAY_PLAN_GROWTH_MONTHLY: "plan_startermonthly" });
+    env = await loadEnv();
+    expect(() => env.getBillingEnv()).toThrow(/its own Razorpay plan id/);
   });
 });

@@ -24,12 +24,18 @@ function billingProps(overrides: Partial<BillingModeProps> = {}): BillingModePro
   return {
     mode: "billing",
     organizationSlug: "acme",
-    current: { plan: "FREE", interval: null, manageable: false, cancelAtPeriodEnd: false },
+    current: {
+      plan: "FREE",
+      interval: null,
+      manageable: false,
+      cancelAtPeriodEnd: false,
+      hasScheduledChange: false,
+    },
     canManage: true,
     configured: true,
     startCheckoutAction: vi.fn(async () => ({
       ok: true as const,
-      data: { url: "https://checkout.stripe.com/c/pay/cs_test_x" },
+      data: { url: "https://rzp.io/i/sub_test" },
     })),
     changePlanAction: vi.fn(async () => ({ ok: true as const, data: null })),
     cancelAction: vi.fn(async () => ({ ok: true as const, data: null })),
@@ -47,6 +53,22 @@ describe("PricingTable (public)", () => {
     expect(within(card("Growth")).getByText("Save $38 a year")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Monthly" }));
     expect(prices()[1]).toBe("$9/month");
+  });
+
+  it("shows GST on every paid plan", () => {
+    render(<PricingTable mode="public" />);
+    const tax = screen.getAllByTestId("plan-tax").map((line) => line.textContent);
+    expect(tax).toEqual([
+      "No GST",
+      "+ 18% GST · $10.62/month total",
+      "+ 18% GST · $22.42/month total",
+      "+ 18% GST · $46.02/month total",
+      "+ 18% GST · $93.22/month total",
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: /Annual/ }));
+    expect(screen.getAllByTestId("plan-tax")[4]).toHaveTextContent(
+      "+ 18% GST · $932.20/year total",
+    );
   });
 
   it("lists each plan's limits and sends visitors to sign-up", () => {
@@ -68,31 +90,53 @@ describe("PricingTable (public)", () => {
 });
 
 describe("PricingTable (billing page)", () => {
-  it("starts Stripe Checkout with only the plan and interval, then redirects", async () => {
-    const assign = vi.fn();
-    vi.stubGlobal("location", { ...window.location, assign });
+  it("shows the price, GST and total before paying, then links to Razorpay's page", async () => {
     const props = billingProps();
     render(<PricingTable {...props} />);
     expect(within(card("Free")).getByText("Current plan")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /Annual/ }));
     fireEvent.click(within(card("Growth")).getByRole("button", { name: "Upgrade to Growth" }));
-    await waitFor(() =>
-      expect(assign).toHaveBeenCalledWith("https://checkout.stripe.com/c/pay/cs_test_x"),
-    );
+    // Nothing is created until the customer has seen the total with GST.
+    expect(props.startCheckoutAction).not.toHaveBeenCalled();
+    const breakdown = within(card("Growth")).getByLabelText("Price breakdown");
+    expect(breakdown).toHaveTextContent("Growth (annual)$190.00");
+    expect(breakdown).toHaveTextContent("GST (18%)$34.20");
+    expect(breakdown).toHaveTextContent("Total per year$224.20");
+    expect(within(card("Growth")).getByText(/today and every year until you cancel/)).toBeVisible();
+    fireEvent.click(within(card("Growth")).getByRole("button", { name: "Continue to payment" }));
+    const pay = await within(card("Growth")).findByRole("link", { name: /Pay with Razorpay/ });
+    expect(pay).toHaveAttribute("href", "https://rzp.io/i/sub_test");
+    expect(pay).toHaveAttribute("target", "_blank");
+    expect(pay).toHaveAttribute("rel", "noopener noreferrer");
+    expect(within(card("Growth")).getByText(/Pay \$224\.20 \(includes GST\)/)).toBeVisible();
     expect(props.startCheckoutAction).toHaveBeenCalledWith("acme", {
       plan: "GROWTH",
       interval: "YEAR",
     });
-    vi.unstubAllGlobals();
+    fireEvent.click(within(card("Growth")).getByRole("button", { name: /refresh status/ }));
+    expect(refresh).toHaveBeenCalled();
   });
 
-  it("confirms plan changes on an existing subscription", async () => {
+  it("confirms plan changes on an existing subscription, saying when they apply", async () => {
     const props = billingProps({
-      current: { plan: "GROWTH", interval: "MONTH", manageable: true, cancelAtPeriodEnd: false },
+      current: {
+        plan: "GROWTH",
+        interval: "MONTH",
+        manageable: true,
+        cancelAtPeriodEnd: false,
+        hasScheduledChange: false,
+      },
     });
     render(<PricingTable {...props} />);
     expect(within(card("Growth")).getByText("Current plan")).toBeVisible();
+    fireEvent.click(within(card("Starter")).getByRole("button", { name: "Downgrade to Starter" }));
+    expect(
+      within(card("Starter")).getByText("Applies at the end of the current billing period."),
+    ).toBeVisible();
+    fireEvent.click(within(card("Starter")).getByRole("button", { name: "Back" }));
     fireEvent.click(within(card("Agency")).getByRole("button", { name: "Upgrade to Agency" }));
+    expect(within(card("Agency")).getByText(/Applies right away/)).toBeVisible();
+    expect(within(card("Agency")).getByTestId("price-total")).toHaveTextContent("$93.22");
     expect(props.changePlanAction).not.toHaveBeenCalled();
     fireEvent.click(within(card("Agency")).getByRole("button", { name: "Confirm" }));
     await waitFor(() =>
@@ -107,15 +151,37 @@ describe("PricingTable (billing page)", () => {
     ).toBeVisible();
   });
 
-  it("downgrades to Free by cancelling at the end of the period", async () => {
+  it("downgrades to Free by cancelling at the end of the period (final)", async () => {
     const props = billingProps({
-      current: { plan: "STARTER", interval: "YEAR", manageable: true, cancelAtPeriodEnd: false },
+      current: {
+        plan: "STARTER",
+        interval: "YEAR",
+        manageable: true,
+        cancelAtPeriodEnd: false,
+        hasScheduledChange: false,
+      },
     });
     render(<PricingTable {...props} />);
     fireEvent.click(within(card("Free")).getByRole("button", { name: "Downgrade to Free" }));
-    expect(within(card("Free")).getByText(/Nothing is deleted/)).toBeVisible();
+    expect(within(card("Free")).getByText(/can't be undone; nothing is deleted/)).toBeVisible();
     fireEvent.click(within(card("Free")).getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(props.cancelAction).toHaveBeenCalledWith("acme", {}));
+  });
+
+  it.each([
+    ["a cancellation", { cancelAtPeriodEnd: true, hasScheduledChange: false }],
+    ["a scheduled plan change", { cancelAtPeriodEnd: false, hasScheduledChange: true }],
+  ])("offers no plan actions while %s is pending", (_label, pending) => {
+    render(
+      <PricingTable
+        {...billingProps({
+          current: { plan: "GROWTH", interval: "MONTH", manageable: true, ...pending },
+        })}
+      />,
+    );
+    expect(within(screen.getByRole("list", { name: "Plans" })).queryAllByRole("button")).toEqual(
+      [],
+    );
   });
 
   it("shows the server's error (e.g. a refused change)", async () => {
@@ -130,6 +196,7 @@ describe("PricingTable (billing page)", () => {
     });
     render(<PricingTable {...props} />);
     fireEvent.click(within(card("Starter")).getByRole("button", { name: "Upgrade to Starter" }));
+    fireEvent.click(within(card("Starter")).getByRole("button", { name: "Continue to payment" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("You do not have permission");
   });
 
@@ -154,6 +221,7 @@ describe("PricingTable (billing page)", () => {
             interval: "MONTH",
             manageable: true,
             cancelAtPeriodEnd: false,
+            hasScheduledChange: false,
           },
         })}
       />,

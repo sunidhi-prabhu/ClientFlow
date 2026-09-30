@@ -60,7 +60,6 @@ export const AUDIT_ACTIONS = {
   "billing.checkout_started": { label: "Checkout started", resourceType: "billing" },
   "billing.plan_change_requested": { label: "Plan change requested", resourceType: "billing" },
   "billing.cancellation_requested": { label: "Cancellation requested", resourceType: "billing" },
-  "billing.cancellation_withdrawn": { label: "Cancellation withdrawn", resourceType: "billing" },
   "billing.subscription_activated": { label: "Subscription activated", resourceType: "billing" },
   "billing.plan_changed": { label: "Plan changed", resourceType: "billing" },
   "billing.subscription_status_changed": {

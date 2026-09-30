@@ -93,8 +93,7 @@ function setPlan(organizationId: string, plan: BillingPlan, status: Subscription
     plan,
     status,
     interval: "MONTH" as const,
-    stripeCustomerId: `cus_${organizationId}`,
-    stripeSubscriptionId: `sub_${organizationId}`,
+    providerSubscriptionId: `sub_${organizationId}`,
   };
   return getDb().subscription.upsert({
     where: { organizationId },
@@ -253,7 +252,7 @@ describe("paid plans", () => {
       await setPlan(acme.id, "AGENCY", status);
       expect(await createClient(`Blocked while ${status}`)).toMatchObject({ ok: false });
     }
-    // PAST_DUE keeps the plan while Stripe retries the payment.
+    // PAST_DUE keeps the plan while Razorpay retries the payment.
     await setPlan(acme.id, "AGENCY", "PAST_DUE");
     expect(await createClient("Allowed while retrying")).toMatchObject({ ok: true });
   });
@@ -334,7 +333,7 @@ describe("request tampering", () => {
     ).toBe("AGENCY");
   });
 
-  it("the database refuses a paid plan without a Stripe subscription", async () => {
+  it("the database refuses a paid plan without a provider subscription", async () => {
     await expect(
       getDb().subscription.create({
         data: { organizationId: acme.id, plan: "AGENCY", status: "ACTIVE" },

@@ -37,7 +37,7 @@ export const modelPolicies = {
   InvoiceItem: { scope: "tenant", scalarFields: Prisma.InvoiceItemScalarFieldEnum },
   AuditLog: { scope: "tenant", scalarFields: Prisma.AuditLogScalarFieldEnum, appendOnly: true },
   // Billing state: read by the limit checks and the billing page; written from
-  // verified Stripe data (src/server/billing).
+  // subscription data read back from the payment provider (src/server/billing).
   Subscription: { scope: "tenant", scalarFields: Prisma.SubscriptionScalarFieldEnum },
   // Authentication (Better Auth): accessed only through src/server/auth.
   User: { scope: "global", scalarFields: Prisma.UserScalarFieldEnum },
@@ -45,8 +45,8 @@ export const modelPolicies = {
   Account: { scope: "global", scalarFields: Prisma.AccountScalarFieldEnum },
   Verification: { scope: "global", scalarFields: Prisma.VerificationScalarFieldEnum },
   RateLimit: { scope: "global", scalarFields: Prisma.RateLimitScalarFieldEnum },
-  // Processed Stripe webhook events (idempotency); src/server/billing/sync.ts only.
-  StripeEvent: { scope: "global", scalarFields: Prisma.StripeEventScalarFieldEnum },
+  // Processed billing webhook events (idempotency); src/server/billing/sync.ts only.
+  BillingEvent: { scope: "global", scalarFields: Prisma.BillingEventScalarFieldEnum },
 } satisfies Record<Prisma.ModelName, ModelPolicy>;
 
 export type ModelName = keyof typeof modelPolicies;

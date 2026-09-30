@@ -1,87 +1,64 @@
 import { type Metadata } from "next";
 
 import { PricingTable } from "@/components/billing/pricing-table";
-import { SubscriptionActions } from "@/components/billing/subscription-actions";
 import { UsageMeter } from "@/components/billing/usage-meter";
 import { AccessDenied } from "@/components/layout/access-denied";
-import { INTERVAL_LABELS, isPaidPlan, PLANS, SUBSCRIPTION_STATUS_LABELS } from "@/lib/billing";
+import {
+  formatUsd,
+  INTERVAL_LABELS,
+  isPaidPlan,
+  PLANS,
+  priceBreakdown,
+  SUBSCRIPTION_STATUS_LABELS,
+} from "@/lib/billing";
 import { formatCalendarDate } from "@/lib/calendar-date";
 import { hasPermission } from "@/lib/permissions";
-import { checkoutSessionIdSchema } from "@/lib/validation/billing";
-import { logger } from "@/lib/logger";
-import { getBillingOverview } from "@/server/billing/service";
-import { stripeBillingProvider } from "@/server/billing/stripe";
-import { syncCheckoutSession } from "@/server/billing/sync";
+import { getBillingOverview, refreshBillingState } from "@/server/billing/service";
 import { tenantPage } from "@/server/protected";
 
-import {
-  cancelSubscriptionAction,
-  changePlanAction,
-  openBillingPortalAction,
-  resumeSubscriptionAction,
-  startCheckoutAction,
-} from "./actions";
+import { cancelSubscriptionAction, changePlanAction, startCheckoutAction } from "./actions";
 
 export const metadata: Metadata = { title: "Billing" };
 
-export default async function BillingPage({
-  params,
-  searchParams,
-}: PageProps<"/o/[orgSlug]/billing">) {
+export default async function BillingPage({ params }: PageProps<"/o/[orgSlug]/billing">) {
   const { orgSlug } = await params;
   const access = await tenantPage(orgSlug, "billing:read");
   if (!access.allowed) {
     return <AccessDenied message="Only owners and admins can see the organization's plan." />;
   }
   const { ctx, db } = access;
-  const query = await searchParams;
 
-  // Returning from Stripe Checkout: apply the subscription now instead of
-  // waiting for the webhook. The session id is only a lookup key: the session
-  // is fetched from Stripe and must belong to this organization.
-  let checkoutMessage: string | null = null;
-  if (query.checkout === "success") {
-    const sessionId = checkoutSessionIdSchema.safeParse(query.session_id);
-    if (sessionId.success) {
-      try {
-        await syncCheckoutSession(ctx.organization.id, sessionId.data, stripeBillingProvider);
-      } catch (error) {
-        logger.warn("Checkout return sync failed; the webhook will apply it", { error });
-      }
-    }
-    checkoutMessage = "Thanks! Your plan updates as soon as Stripe confirms the payment.";
-  } else if (query.checkout === "cancelled") {
-    checkoutMessage = "Checkout was cancelled. Your plan has not changed.";
-  }
-
+  // Re-read the organization's own subscription from Razorpay (e.g. right after
+  // paying on Razorpay's page), using only the subscription id stored for it.
+  await refreshBillingState(ctx);
   const overview = await getBillingOverview(db);
   const { subscription, entitlements, usage } = overview;
   const canManage = hasPermission(ctx.role, "billing:manage");
   const plan = entitlements.plan;
-  const manageable = Boolean(
-    subscription?.status &&
-    ["ACTIVE", "TRIALING", "PAST_DUE"].includes(subscription.status) &&
-    isPaidPlan(subscription.plan),
-  );
   const status = subscription?.status;
+  const manageable = Boolean(
+    status && ["ACTIVE", "TRIALING", "PAST_DUE"].includes(status) && isPaidPlan(subscription!.plan),
+  );
 
   return (
     <div className="space-y-8">
       <div className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Billing</h1>
         <p className="text-sm text-muted-foreground">
-          Your organization&apos;s plan, usage and subscription.
+          Your organization&apos;s plan, usage and subscription. Payments are processed securely by
+          Razorpay; card details never reach ClientFlow.
         </p>
       </div>
 
-      {checkoutMessage && (
-        <p role="status" className="rounded-lg bg-muted px-4 py-3 text-sm">
-          {checkoutMessage}
-        </p>
-      )}
       {!overview.configured && (
         <p role="status" className="rounded-lg bg-muted px-4 py-3 text-sm">
           Paid plans are not available yet, so the plan cannot be changed right now.
+        </p>
+      )}
+      {status === "INCOMPLETE" && (
+        <p role="status" className="rounded-lg bg-muted px-4 py-3 text-sm">
+          Waiting for your payment. After paying on Razorpay&apos;s page, reload this page; your
+          plan updates as soon as Razorpay confirms it. To start over, choose a plan again below.
         </p>
       )}
 
@@ -108,6 +85,15 @@ export default async function BillingPage({
                   : "Free"}
               </dd>
             </div>
+            {subscription?.interval && isPaidPlan(plan) && (
+              <div className="flex justify-between gap-2">
+                <dt className="text-muted-foreground">Amount</dt>
+                <dd data-testid="renewal-amount">
+                  {formatUsd(priceBreakdown(plan, subscription.interval).totalCents)} (incl.{" "}
+                  {formatUsd(priceBreakdown(plan, subscription.interval).taxCents)} GST)
+                </dd>
+              </div>
+            )}
             {subscription?.currentPeriodEnd && isPaidPlan(plan) && (
               <div className="flex justify-between gap-2">
                 <dt className="text-muted-foreground">
@@ -119,8 +105,8 @@ export default async function BillingPage({
           </dl>
           {status === "PAST_DUE" && (
             <p role="alert" className="text-sm text-destructive">
-              Your last payment failed. Update your payment details to keep the {PLANS[plan].name}{" "}
-              plan.
+              Your last payment failed. Razorpay will retry charging your card; the{" "}
+              {PLANS[plan].name} plan stays active meanwhile.
             </p>
           )}
           {subscription && isPaidPlan(subscription.plan) && !isPaidPlan(plan) && status && (
@@ -129,19 +115,15 @@ export default async function BillingPage({
               {SUBSCRIPTION_STATUS_LABELS[status].toLowerCase()}, so the Free limits apply.
             </p>
           )}
+          {subscription?.hasScheduledChange && (
+            <p className="text-sm text-muted-foreground">
+              A plan change is scheduled for the end of this billing period.
+            </p>
+          )}
           {subscription?.cancelAtPeriodEnd && (
             <p className="text-sm text-muted-foreground">
               Your organization moves to the Free plan when this period ends. Nothing is deleted.
             </p>
-          )}
-          {canManage && overview.configured && (
-            <SubscriptionActions
-              organizationSlug={ctx.organization.slug}
-              showPortal={Boolean(subscription?.hasCustomer)}
-              showResume={Boolean(manageable && subscription?.cancelAtPeriodEnd)}
-              portalAction={openBillingPortalAction}
-              resumeAction={resumeSubscriptionAction}
-            />
           )}
         </div>
         <UsageMeter label="clients" usage={usage.clients} />
@@ -155,7 +137,7 @@ export default async function BillingPage({
           </h2>
           <p className="text-sm text-muted-foreground">
             {canManage
-              ? "Upgrades apply as soon as the payment succeeds. Downgrades never delete anything."
+              ? "Upgrades apply as soon as Razorpay confirms the payment. Downgrades apply at the end of the billing period and never delete anything."
               : "Only owners and admins can change the plan."}
           </p>
         </div>
@@ -167,6 +149,7 @@ export default async function BillingPage({
             interval: manageable ? (subscription?.interval ?? null) : null,
             manageable,
             cancelAtPeriodEnd: Boolean(subscription?.cancelAtPeriodEnd),
+            hasScheduledChange: Boolean(subscription?.hasScheduledChange),
           }}
           canManage={canManage}
           configured={overview.configured}

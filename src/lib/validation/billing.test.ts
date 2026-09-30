@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { checkoutSessionIdSchema, paidPlanInput } from "./billing";
+import { paidPlanInput } from "./billing";
 
 describe("paidPlanInput", () => {
   it("accepts a paid plan and interval, and strips everything else", () => {
@@ -8,7 +8,8 @@ describe("paidPlanInput", () => {
       paidPlanInput.parse({
         plan: "GROWTH",
         interval: "YEAR",
-        priceId: "price_cheap",
+        planId: "plan_cheap",
+        subscriptionId: "sub_other",
         organizationId: "org_other",
         clientLimit: 10_000,
         status: "ACTIVE",
@@ -25,14 +26,5 @@ describe("paidPlanInput", () => {
     [{}],
   ])("rejects forged or incomplete input %j", (input) => {
     expect(paidPlanInput.safeParse(input).success).toBe(false);
-  });
-});
-
-describe("checkoutSessionIdSchema", () => {
-  it("accepts Checkout Session ids only", () => {
-    expect(checkoutSessionIdSchema.safeParse("cs_test_a1B2c3D4e5F6g7").success).toBe(true);
-    for (const value of ["sub_123", "cs_test_", "cs_test_abc'--", "", undefined]) {
-      expect(checkoutSessionIdSchema.safeParse(value).success).toBe(false);
-    }
   });
 });

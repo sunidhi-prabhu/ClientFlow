@@ -13,8 +13,8 @@ import { type TenantDb } from "@/server/tenancy/tenant-db";
 
 /*
  * Plan limits (tenant client only, no billing provider). The limits come from
- * the organization's stored billing state (written from verified Stripe data
- * by ./sync.ts), never from a request. Archived clients and projects do not
+ * the organization's stored billing state (written by ./sync.ts from
+ * subscription data read back from the payment provider), never from a request. Archived clients and projects do not
  * count; existing records are never blocked, only additions.
  */
 

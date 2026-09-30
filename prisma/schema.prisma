@@ -540,36 +540,39 @@ enum SubscriptionStatus {
 }
 
 /// Tenant-owned: the organization's billing state, one row per organization at
-/// most (no row = Free plan, never billed). Written from verified Stripe data
-/// only (src/server/billing/sync.ts); the entitlement (client/project limits)
-/// is derived from `plan` + `status`, never stored or taken from requests.
-/// Card details are never stored: Stripe holds them.
+/// most (no row = Free plan, never billed). Plan and status are written only
+/// from subscription data read back from the payment provider (Razorpay) by
+/// src/server/billing/sync.ts; the entitlement (client/project limits) is
+/// derived from `plan` + `status`, never stored or taken from requests. Card
+/// details are never stored: the provider holds them.
 model Subscription {
-  id                   String              @id @default(cuid())
-  organizationId       String              @unique
-  /// The plan paid for by the Stripe subscription (FREE when there is none).
-  plan                 BillingPlan         @default(FREE)
-  /// Null until Stripe reports a subscription.
-  status               SubscriptionStatus?
-  interval             BillingInterval?
-  stripeCustomerId     String?             @unique
-  stripeSubscriptionId String?             @unique
+  id                     String              @id @default(cuid())
+  organizationId         String              @unique
+  /// The plan paid for by the provider subscription (FREE when there is none).
+  plan                   BillingPlan         @default(FREE)
+  /// Null until a subscription exists at the provider.
+  status                 SubscriptionStatus?
+  interval               BillingInterval?
+  /// The provider's subscription id (Razorpay `sub_…`), created by ClientFlow.
+  providerSubscriptionId String?             @unique
   /// End of the paid period; with cancelAtPeriodEnd, when access ends.
-  currentPeriodEnd     DateTime?
-  cancelAtPeriodEnd    Boolean             @default(false)
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  currentPeriodEnd       DateTime?
+  cancelAtPeriodEnd      Boolean             @default(false)
+  /// A plan change is scheduled for the end of the current period.
+  hasScheduledChange     Boolean             @default(false)
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@unique([organizationId, id])
 }
 
-/// Stripe webhook events already applied (idempotency: Stripe delivers at least
-/// once). Global: an event is resolved to an organization only after its
-/// signature is verified, through the stored Stripe customer id.
-model StripeEvent {
-  /// Stripe event id (evt_…).
+/// Provider webhook events already applied (idempotency: webhooks are
+/// delivered at least once). Global: an event is resolved to an organization
+/// only after its signature is verified, through the stored subscription id.
+model BillingEvent {
+  /// The provider's event id (Razorpay `x-razorpay-event-id` header).
   id          String   @id
   type        String
   processedAt DateTime @default(now())

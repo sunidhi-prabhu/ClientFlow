@@ -5,11 +5,15 @@ import {
   effectivePlan,
   entitlementsFor,
   formatPlanPrice,
+  formatUsd,
+  GST_RATE_BPS,
   limitReachedMessage,
   PAID_PLANS,
+  planChangeTiming,
   PLAN_ORDER,
   planRank,
   PLANS,
+  priceBreakdown,
   type SubscriptionStatus,
   usageOf,
 } from "./billing";
@@ -61,6 +65,16 @@ describe("plan definitions", () => {
   it("ranks plans from Free to Agency", () => {
     expect(PLAN_ORDER.map(planRank)).toEqual([0, 1, 2, 3, 4]);
   });
+
+  it("applies upgrades now and downgrades at the end of the period", () => {
+    const growthMonthly = { plan: "GROWTH", interval: "MONTH" } as const;
+    expect(planChangeTiming(growthMonthly, { plan: "AGENCY", interval: "MONTH" })).toBe("now");
+    expect(planChangeTiming(growthMonthly, { plan: "STARTER", interval: "YEAR" })).toBe(
+      "cycle_end",
+    );
+    expect(planChangeTiming(growthMonthly, { plan: "GROWTH", interval: "YEAR" })).toBe("now");
+    expect(planChangeTiming({ plan: "GROWTH", interval: "YEAR" }, growthMonthly)).toBe("cycle_end");
+  });
 });
 
 describe("entitlements", () => {
@@ -81,7 +95,7 @@ describe("entitlements", () => {
     });
   });
 
-  it("keep the paid plan while trialing or while Stripe retries a failed payment", () => {
+  it("keep the paid plan while trialing or while the provider retries a failed payment", () => {
     for (const status of ["TRIALING", "PAST_DUE"] as const) {
       expect(effectivePlan({ plan: "GROWTH", status })).toBe("GROWTH");
     }
@@ -128,5 +142,28 @@ describe("limit messages", () => {
     expect(limitReachedMessage("clients", 15, "restore")).toBe(
       "You've reached your 15-client limit. Upgrade your plan to restore this client.",
     );
+  });
+});
+
+describe("GST", () => {
+  it("adds 18% GST to every paid plan, exact to the cent", () => {
+    expect(GST_RATE_BPS).toBe(1_800);
+    const totals = PAID_PLANS.map((plan) => [
+      priceBreakdown(plan, "MONTH").totalCents,
+      priceBreakdown(plan, "YEAR").totalCents,
+    ]);
+    expect(totals).toEqual([
+      [1_062, 10_620],
+      [2_242, 22_420],
+      [4_602, 46_020],
+      [9_322, 93_220],
+    ]);
+    expect(priceBreakdown("STARTER", "MONTH")).toEqual({
+      priceCents: 900,
+      taxCents: 162,
+      totalCents: 1_062,
+    });
+    expect(priceBreakdown("FREE", "MONTH")).toEqual({ priceCents: 0, taxCents: 0, totalCents: 0 });
+    expect(formatUsd(1_062)).toBe("$10.62");
   });
 });

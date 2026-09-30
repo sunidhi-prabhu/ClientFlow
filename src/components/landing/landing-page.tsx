@@ -11,6 +11,7 @@ import {
 import Link from "next/link";
 
 import { PricingTable } from "@/components/billing/pricing-table";
+import { SiteFooter } from "@/components/legal/site-footer";
 import { Logo } from "@/components/layout/logo";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -236,7 +237,7 @@ export function LandingPage() {
               </h2>
               <p className="mt-3 text-muted-foreground">
                 Start free with 5 clients and 5 projects. Upgrade when you need more; downgrading
-                never deletes your work.
+                never deletes your work. Prices are in US dollars; 18% GST is added at checkout.
               </p>
             </div>
             <PricingTable mode="public" />
@@ -266,12 +267,7 @@ export function LandingPage() {
         </section>
       </main>
 
-      <footer className="border-t">
-        <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-2 px-4 py-6 text-center text-sm text-muted-foreground sm:flex-row sm:px-6 sm:text-left">
-          <span>ClientFlow</span>
-          <span>CRM and project management for freelancers and small teams.</span>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

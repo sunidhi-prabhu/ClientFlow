@@ -18,8 +18,8 @@ const RAW_DB_ALLOWED = [
   "src/server/auth/**/*.ts",
   // Creates an organization and its first OWNER before any tenant exists.
   "src/server/organizations/bootstrap.ts",
-  // Stripe webhooks carry no session: resolves the organization from the
-  // stored Stripe customer id and records processed event ids (global table).
+  // Billing webhooks carry no session: resolves the organization from the
+  // stored provider subscription id and records processed event ids (global table).
   "src/server/billing/sync.ts",
 ];
 

@@ -20,7 +20,7 @@ export function validateConfigurationAtStartup(): void {
   const billing = getBillingEnv();
   logger.info("Configuration validated", {
     nodeEnv: server.NODE_ENV,
-    billing: billing.STRIPE_SECRET_KEY ? "stripe" : "not configured",
+    billing: billing.RAZORPAY_KEY_ID ? "razorpay" : "not configured",
   });
 }
 

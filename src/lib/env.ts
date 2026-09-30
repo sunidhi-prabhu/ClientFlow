@@ -173,74 +173,83 @@ export function getEmailEnv(): EmailEnv {
   return cachedEmail;
 }
 
-/** Stripe Price ids, one per paid plan and interval (created in the Stripe dashboard). */
-export const STRIPE_PRICE_ENV = {
-  STARTER: { MONTH: "STRIPE_PRICE_STARTER_MONTHLY", YEAR: "STRIPE_PRICE_STARTER_ANNUAL" },
-  GROWTH: { MONTH: "STRIPE_PRICE_GROWTH_MONTHLY", YEAR: "STRIPE_PRICE_GROWTH_ANNUAL" },
+/** Razorpay plan ids, one per paid plan and interval (USD plans, created once per account). */
+export const RAZORPAY_PLAN_ENV = {
+  STARTER: { MONTH: "RAZORPAY_PLAN_STARTER_MONTHLY", YEAR: "RAZORPAY_PLAN_STARTER_ANNUAL" },
+  GROWTH: { MONTH: "RAZORPAY_PLAN_GROWTH_MONTHLY", YEAR: "RAZORPAY_PLAN_GROWTH_ANNUAL" },
   PROFESSIONAL: {
-    MONTH: "STRIPE_PRICE_PROFESSIONAL_MONTHLY",
-    YEAR: "STRIPE_PRICE_PROFESSIONAL_ANNUAL",
+    MONTH: "RAZORPAY_PLAN_PROFESSIONAL_MONTHLY",
+    YEAR: "RAZORPAY_PLAN_PROFESSIONAL_ANNUAL",
   },
-  AGENCY: { MONTH: "STRIPE_PRICE_AGENCY_MONTHLY", YEAR: "STRIPE_PRICE_AGENCY_ANNUAL" },
+  AGENCY: { MONTH: "RAZORPAY_PLAN_AGENCY_MONTHLY", YEAR: "RAZORPAY_PLAN_AGENCY_ANNUAL" },
 } as const;
 
-const STRIPE_PRICE_VARIABLES = Object.values(STRIPE_PRICE_ENV).flatMap((byInterval) =>
+const RAZORPAY_PLAN_VARIABLES = Object.values(RAZORPAY_PLAN_ENV).flatMap((byInterval) =>
   Object.values(byInterval),
 );
 
-const priceId = optionalString.pipe(
+const razorpayPlanId = optionalString.pipe(
   z
     .string()
-    .regex(/^price_[A-Za-z0-9]+$/, "must be a Stripe Price id (price_…)")
+    .regex(/^plan_[A-Za-z0-9]+$/, "must be a Razorpay plan id (plan_…)")
     .optional(),
 );
 
 const billingEnvSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-    STRIPE_SECRET_KEY: optionalString.pipe(
+    RAZORPAY_KEY_ID: optionalString.pipe(
       z
         .string()
-        .regex(/^(sk|rk)_(test|live)_[A-Za-z0-9]+$/, "must be a Stripe secret or restricted key")
+        .regex(
+          /^rzp_(test|live)_[A-Za-z0-9]+$/,
+          "must be a Razorpay key id (rzp_test_… or rzp_live_…)",
+        )
         .optional(),
     ),
-    STRIPE_WEBHOOK_SECRET: optionalString.pipe(
-      z
-        .string()
-        .regex(/^whsec_[A-Za-z0-9]+$/, "must be a Stripe webhook signing secret (whsec_…)")
-        .optional(),
+    RAZORPAY_KEY_SECRET: optionalString.pipe(
+      z.string().min(10, "must be the key secret shown with the key id").optional(),
     ),
-    ...Object.fromEntries(STRIPE_PRICE_VARIABLES.map((name) => [name, priceId])),
+    /** The secret you type when creating the webhook in the Razorpay dashboard. */
+    RAZORPAY_WEBHOOK_SECRET: optionalString.pipe(
+      z.string().min(16, "use at least 16 random characters").optional(),
+    ),
+    ...Object.fromEntries(RAZORPAY_PLAN_VARIABLES.map((name) => [name, razorpayPlanId])),
   })
   .superRefine((env, context) => {
     const values = env as Record<string, string | undefined>;
-    const required = ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", ...STRIPE_PRICE_VARIABLES];
+    const required = [
+      "RAZORPAY_KEY_ID",
+      "RAZORPAY_KEY_SECRET",
+      "RAZORPAY_WEBHOOK_SECRET",
+      ...RAZORPAY_PLAN_VARIABLES,
+    ];
     const missing = required.filter((name) => !values[name]);
-    // Billing is optional: all Stripe variables, or none (paid plans unavailable).
+    // Billing is optional: all Razorpay variables, or none (paid plans unavailable).
     if (missing.length > 0 && missing.length < required.length) {
       for (const name of missing) {
         context.addIssue({
           code: "custom",
           path: [name],
           message:
-            "is required when Stripe billing is configured (set all Stripe variables or none)",
+            "is required when Razorpay billing is configured (set all Razorpay variables or none)",
         });
       }
     }
     // Never charge real cards outside production.
-    if (env.NODE_ENV !== "production" && /^(sk|rk)_live_/.test(env.STRIPE_SECRET_KEY ?? "")) {
+    if (env.NODE_ENV !== "production" && /^rzp_live_/.test(env.RAZORPAY_KEY_ID ?? "")) {
       context.addIssue({
         code: "custom",
-        path: ["STRIPE_SECRET_KEY"],
-        message: "must be a test-mode key (sk_test_…) outside production",
+        path: ["RAZORPAY_KEY_ID"],
+        message: "must be a test-mode key (rzp_test_…) outside production",
       });
     }
-    const prices = STRIPE_PRICE_VARIABLES.map((name) => values[name]).filter(Boolean);
-    if (new Set(prices).size !== prices.length) {
+    const plans = RAZORPAY_PLAN_VARIABLES.map((name) => values[name]).filter(Boolean);
+    if (new Set(plans).size !== plans.length) {
       context.addIssue({
         code: "custom",
-        path: ["STRIPE_PRICE_STARTER_MONTHLY"],
-        message: "each plan and interval needs its own Stripe Price id",
+        path: ["RAZORPAY_PLAN_STARTER_MONTHLY"],
+        message: "each plan and interval needs its own Razorpay plan id",
       });
     }
   });
@@ -249,7 +258,7 @@ export type BillingEnv = z.infer<typeof billingEnvSchema>;
 
 let cachedBilling: BillingEnv | undefined;
 
-/** Stripe billing. `STRIPE_SECRET_KEY` is undefined when billing is not configured. */
+/** Razorpay billing. `RAZORPAY_KEY_ID` is undefined when billing is not configured. */
 export function getBillingEnv(): BillingEnv {
   cachedBilling ??= parseEnv(billingEnvSchema);
   return cachedBilling;

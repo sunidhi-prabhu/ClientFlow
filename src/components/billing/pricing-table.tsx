@@ -11,15 +11,21 @@ import {
   type BillingInterval,
   type BillingPlan,
   formatPlanPrice,
+  formatUsd,
+  GST_RATE_BPS,
   isPaidPlan,
   type PaidPlan,
+  planChangeTiming,
   PLAN_ORDER,
   planRank,
   PLANS,
+  priceBreakdown,
 } from "@/lib/billing";
 import { type ActionResult } from "@/lib/errors";
 import { formatMoney } from "@/lib/money";
 import { cn } from "@/lib/utils";
+
+import { PriceBreakdown } from "./price-breakdown";
 
 type PlanAction = (
   organizationSlug: string,
@@ -36,6 +42,7 @@ export type BillingModeProps = {
     interval: BillingInterval | null;
     manageable: boolean;
     cancelAtPeriodEnd: boolean;
+    hasScheduledChange: boolean;
   };
   canManage: boolean;
   configured: boolean;
@@ -98,6 +105,7 @@ function PlanCardAction({
 }) {
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
+  const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const { current, canManage, configured, organizationSlug } = props;
@@ -111,10 +119,12 @@ function PlanCardAction({
     );
   }
   if (!canManage) return null;
+  // A cancellation or plan change is already pending until the period ends.
+  if (current.manageable && (current.cancelAtPeriodEnd || current.hasScheduledChange)) return null;
 
   // Free: downgrading means cancelling at the end of the paid period.
   if (!isPaidPlan(plan)) {
-    if (!configured || !current.manageable || current.cancelAtPeriodEnd) return null;
+    if (!configured || !current.manageable) return null;
   } else if (!configured) {
     return <p className="text-sm text-muted-foreground">Not available yet</p>;
   }
@@ -128,8 +138,7 @@ function PlanCardAction({
         : planRank(plan) < planRank(current.plan)
           ? `Downgrade to ${PLANS[plan].name}`
           : `Switch to ${interval === "YEAR" ? "annual" : "monthly"}`;
-  // A first subscription goes to Stripe Checkout; changes to an existing one are confirmed here.
-  const needsConfirm = current.manageable;
+  const timing = isPaidPlan(plan) ? planChangeTiming(current, { plan, interval }) : "cycle_end";
 
   function run() {
     setError(null);
@@ -140,8 +149,7 @@ function PlanCardAction({
       } else if (!current.manageable) {
         const result = await props.startCheckoutAction(organizationSlug, { plan, interval });
         if (!result.ok) return setError(result.error.message);
-        const { url } = result.data as { url: string };
-        window.location.assign(url);
+        setPaymentUrl((result.data as { url: string }).url);
         return;
       } else {
         const result = await props.changePlanAction(organizationSlug, { plan, interval });
@@ -152,26 +160,62 @@ function PlanCardAction({
     });
   }
 
+  if (paymentUrl && isPaidPlan(plan)) {
+    return (
+      <div className="space-y-2" role="status">
+        <PriceBreakdown plan={plan} interval={interval} />
+        <p className="text-xs text-muted-foreground">
+          Pay {formatUsd(priceBreakdown(plan, interval).totalCents)} (includes GST) on
+          Razorpay&apos;s secure page, then come back here.
+        </p>
+        <a
+          href={paymentUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={cn(buttonVariants(), "w-full")}
+        >
+          Pay with Razorpay
+          <span className="sr-only"> (opens in a new tab)</span>
+        </a>
+        <Button variant="outline" className="w-full" onClick={() => router.refresh()}>
+          I&apos;ve paid, refresh status
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2">
       {confirming ? (
         <div className="space-y-2">
+          {isPaidPlan(plan) && <PriceBreakdown plan={plan} interval={interval} />}
           <p className="text-xs text-muted-foreground">
-            {isPaidPlan(plan)
-              ? "Stripe charges or credits the difference right away."
-              : "Your paid plan stays active until the end of the billing period. Nothing is deleted."}
+            {!isPaidPlan(plan)
+              ? "Your paid plan stays active until the end of the billing period, then the organization moves to Free. This can't be undone; nothing is deleted."
+              : !current.manageable
+                ? `Razorpay charges this total, including GST, today and every ${interval === "MONTH" ? "month" : "year"} until you cancel.`
+                : timing === "now"
+                  ? "Applies right away. Razorpay charges your card for the new plan, including GST."
+                  : "Applies at the end of the current billing period."}
           </p>
-          <div className="flex gap-2">
-            <Button variant="ghost" disabled={pending} onClick={() => setConfirming(false)}>
-              Back
-            </Button>
+          {/* Stacked: plan cards are narrow (five across on wide screens). */}
+          <div className="grid gap-2">
             <Button
               autoFocus
+              className="w-full"
               variant={isPaidPlan(plan) ? "default" : "destructive"}
               disabled={pending}
               onClick={run}
             >
-              {pending ? "Working…" : "Confirm"}
+              {pending ? "Working…" : !current.manageable ? "Continue to payment" : "Confirm"}
+            </Button>
+            <Button
+              variant="ghost"
+              className="w-full"
+              disabled={pending}
+              onClick={() => setConfirming(false)}
+            >
+              Back
             </Button>
           </div>
         </div>
@@ -182,9 +226,10 @@ function PlanCardAction({
             isPaidPlan(plan) && planRank(plan) > planRank(current.plan) ? "default" : "outline"
           }
           disabled={pending}
-          onClick={() => (needsConfirm ? setConfirming(true) : run())}
+          // Every choice is confirmed first (paid ones show the price, GST and total).
+          onClick={() => setConfirming(true)}
         >
-          {pending ? "Redirecting…" : label}
+          {label}
         </Button>
       )}
       {error && (
@@ -242,6 +287,11 @@ export function PricingTable(props: Props) {
               <div>
                 <p className="text-2xl font-semibold tracking-tight" data-testid="plan-price">
                   {formatPlanPrice(plan, interval)}
+                </p>
+                <p className="min-h-4 text-xs text-muted-foreground" data-testid="plan-tax">
+                  {isPaidPlan(plan)
+                    ? `+ ${GST_RATE_BPS / 100}% GST · ${formatUsd(priceBreakdown(plan, interval).totalCents)}${interval === "MONTH" ? "/month" : "/year"} total`
+                    : "No GST"}
                 </p>
                 <p className="min-h-4 text-xs text-muted-foreground">
                   {interval === "YEAR" && savings > 0

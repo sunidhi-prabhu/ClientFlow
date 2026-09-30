@@ -4,37 +4,40 @@ import { POST as webhook } from "@/app/api/billing/webhook/route";
 import {
   cancelSubscriptionAction,
   changePlanAction,
-  openBillingPortalAction,
-  resumeSubscriptionAction,
   startCheckoutAction,
 } from "@/app/o/[orgSlug]/billing/actions";
 import { createClientAction } from "@/app/o/[orgSlug]/clients/actions";
 import { type MembershipRole } from "@/generated/prisma/enums";
 import { type BillingInterval, type PaidPlan } from "@/lib/billing";
 import { getDb } from "@/lib/db";
-import { getBillingOverview } from "@/server/billing/service";
-import type * as StripeModule from "@/server/billing/stripe";
-import { syncCheckoutSession } from "@/server/billing/sync";
+import type * as RazorpayModule from "@/server/billing/razorpay";
+import { getBillingOverview, refreshBillingState } from "@/server/billing/service";
 import { createOrganization } from "@/server/organizations/bootstrap";
 import { tenantPage } from "@/server/protected";
 import { getTenantDb } from "@/server/tenancy";
+import { getTenantContext } from "@/server/tenancy/context";
 
-import { TEST_BILLING_ENV as PRICES } from "../support/billing-config";
+import { TEST_BILLING_ENV as PLAN_IDS } from "../support/billing-config";
 import { clearBillingEnv } from "../support/billing-env";
 import { createVerifiedUser } from "./support/auth";
-import { fakeStripe, webhookRequest } from "./support/fake-stripe";
+import { fakeRazorpay, webhookRequest } from "./support/fake-razorpay";
 import { actAs } from "./support/next-request";
 
 vi.mock("next/headers", async () => (await import("./support/next-request")).nextHeaders);
-// Stripe is replaced by an in-memory fake; webhook signatures are still
-// verified by the real Stripe SDK code.
-vi.mock("@/server/billing/stripe", async (importOriginal) => {
-  const actual = await importOriginal<typeof StripeModule>();
-  const { fakeStripe: fake } = await import("./support/fake-stripe");
+// Razorpay is replaced by an in-memory fake; webhook signatures are still
+// verified by the real verification code.
+vi.mock("@/server/billing/razorpay", async (importOriginal) => {
+  const actual = await importOriginal<typeof RazorpayModule>();
+  const { fakeRazorpay: fake } = await import("./support/fake-razorpay");
   const { TEST_BILLING_ENV } = await import("../support/billing-config");
-  fake.verifier = (payload: string, signature: string | null) =>
-    actual.verifyStripeWebhook(payload, signature, TEST_BILLING_ENV.STRIPE_WEBHOOK_SECRET);
-  return { ...actual, stripeBillingProvider: fake.provider };
+  fake.verifier = (payload: string, signature: string | null, eventId: string | null) =>
+    actual.verifyRazorpayWebhook(
+      payload,
+      signature,
+      eventId,
+      TEST_BILLING_ENV.RAZORPAY_WEBHOOK_SECRET,
+    );
+  return { ...actual, razorpayBillingProvider: fake.provider };
 });
 
 type Member = { userId: string; cookie: string };
@@ -45,12 +48,14 @@ let outsider: Member;
 
 const billing = (organizationId: string) =>
   getDb().subscription.findUnique({ where: { organizationId } });
+const effectivePlan = async (organizationId: string) =>
+  (await getBillingOverview(getTenantDb(organizationId))).entitlements.plan;
 const auditActions = async (organizationId: string) =>
   (
     await getDb().auditLog.findMany({
       where: { organizationId, action: { startsWith: "billing." } },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      select: { action: true, actorUserId: true, metadata: true },
+      select: { action: true },
     })
   ).map((row) => row.action);
 
@@ -59,32 +64,28 @@ async function postWebhook(...args: Parameters<typeof webhookRequest>) {
   return { status: response.status, body: await response.json() };
 }
 
-/** Checkout started by the OWNER and completed on "Stripe", then its webhook delivered. */
-async function subscribe(plan: PaidPlan = "GROWTH", interval: BillingInterval = "MONTH") {
-  actAs(members.OWNER.cookie);
-  const result = await startCheckoutAction("acme", { plan, interval });
+/** Start checkout as `role` (default OWNER) and return the created Razorpay subscription id. */
+async function checkout(
+  plan: PaidPlan = "GROWTH",
+  interval: BillingInterval = "MONTH",
+  { slug = "acme", as = members.OWNER } = {},
+) {
+  actAs(as.cookie);
+  const result = await startCheckoutAction(slug, { plan, interval });
   if (!result.ok) throw new Error(result.error.message);
-  const sessionId = result.data.url.split("/").pop()!;
-  const subscription = fakeStripe.completeCheckout(sessionId);
-  const delivered = await postWebhook("checkout.session.completed", {
-    id: sessionId,
-    object: "checkout.session",
-    customer: subscription.customerId,
-    subscription: subscription.id,
-    client_reference_id: acme.id,
-  });
-  expect(delivered.status).toBe(200);
-  return { sessionId, subscription };
+  return result.data.url.split("/").pop()!;
 }
 
-const subscriptionEvent = (subscription: { id: string; customerId: string }) => ({
-  id: subscription.id,
-  object: "subscription",
-  customer: subscription.customerId,
-});
+/** Checkout, pay on "Razorpay", and deliver the activation webhook. */
+async function subscribe(plan: PaidPlan = "GROWTH", interval: BillingInterval = "MONTH") {
+  const subscriptionId = await checkout(plan, interval);
+  fakeRazorpay.pay(subscriptionId);
+  expect((await postWebhook("subscription.activated", subscriptionId)).status).toBe(200);
+  return subscriptionId;
+}
 
 beforeEach(async () => {
-  fakeStripe.reset();
+  fakeRazorpay.reset();
   const owner = await createVerifiedUser("owner@example.com");
   acme = await createOrganization(owner.userId, { name: "Acme", slug: "acme" });
   members.OWNER = owner;
@@ -100,47 +101,61 @@ beforeEach(async () => {
 });
 
 describe("checkout", () => {
-  it("OWNER starts Stripe Checkout with the server-configured Price for the chosen plan", async () => {
+  it("OWNER gets a Razorpay payment page for the server-configured plan; nothing is granted yet", async () => {
     actAs(members.OWNER.cookie);
     const result = await startCheckoutAction("acme", {
       plan: "GROWTH",
       interval: "YEAR",
       // Forged values: ignored.
-      priceId: "price_startermonthly",
+      planId: "plan_startermonthly",
       organizationId: globex.id,
       clientLimit: 10_000,
     });
-    expect(result).toMatchObject({ ok: true, data: { url: expect.stringContaining("cs_test_") } });
-    expect(fakeStripe.checkouts).toHaveLength(1);
-    expect(fakeStripe.checkouts[0]).toMatchObject({
-      priceId: PRICES.STRIPE_PRICE_GROWTH_ANNUAL,
-      organizationId: acme.id,
-      successUrl: "http://localhost:3000/o/acme/billing?checkout=success",
-      cancelUrl: "http://localhost:3000/o/acme/billing?checkout=cancelled",
+    expect(result).toMatchObject({
+      ok: true,
+      data: { url: expect.stringMatching(/^https:\/\/rzp\.test\/i\/sub_/) },
     });
-    // A customer is recorded; the plan does not change until Stripe confirms payment.
+    expect(fakeRazorpay.created).toEqual([
+      { planId: PLAN_IDS.RAZORPAY_PLAN_GROWTH_ANNUAL, organizationId: acme.id, totalCount: 10 },
+    ]);
+    const subscriptionId = fakeRazorpay.created.length && [...fakeRazorpay.subscriptions.keys()][0];
     expect(await billing(acme.id)).toMatchObject({
       plan: "FREE",
-      status: null,
-      stripeCustomerId: fakeStripe.customers[0].id,
+      status: "INCOMPLETE",
+      providerSubscriptionId: subscriptionId,
     });
+    expect(await effectivePlan(acme.id)).toBe("FREE");
     expect(await billing(globex.id)).toBeNull();
     expect(await auditActions(acme.id)).toEqual(["billing.checkout_started"]);
+    const started = await getDb().auditLog.findFirstOrThrow({
+      where: { organizationId: acme.id, action: "billing.checkout_started" },
+    });
+    expect(started.metadata).toMatchObject({
+      plan: "GROWTH",
+      interval: "YEAR",
+      priceCents: 19_000,
+      taxCents: 3_420,
+      totalCents: 22_420,
+    });
   });
 
-  it("ADMIN may manage billing too; the customer is reused for a second attempt", async () => {
-    actAs(members.ADMIN.cookie);
-    expect(await startCheckoutAction("acme", { plan: "STARTER", interval: "MONTH" })).toMatchObject(
-      { ok: true },
-    );
-    expect(await startCheckoutAction("acme", { plan: "AGENCY", interval: "MONTH" })).toMatchObject({
-      ok: true,
+  it("monthly subscriptions run 120 cycles, annual 10", async () => {
+    await checkout("STARTER", "MONTH");
+    expect(fakeRazorpay.created.at(-1)).toMatchObject({ totalCount: 120 });
+  });
+
+  it("ADMIN may start checkout; an unpaid earlier checkout is replaced and cancelled", async () => {
+    const first = await checkout("STARTER", "MONTH", { as: members.ADMIN });
+    const second = await checkout("AGENCY", "MONTH", { as: members.ADMIN });
+    expect(fakeRazorpay.cancellations).toEqual([{ subscriptionId: first, atCycleEnd: false }]);
+    expect(await billing(acme.id)).toMatchObject({
+      providerSubscriptionId: second,
+      status: "INCOMPLETE",
     });
-    expect(fakeStripe.customers).toHaveLength(1);
-    expect(fakeStripe.checkouts.map((checkout) => checkout.customerId)).toEqual([
-      fakeStripe.customers[0].id,
-      fakeStripe.customers[0].id,
-    ]);
+    // Paying the abandoned link later changes nothing.
+    fakeRazorpay.pay(first);
+    await postWebhook("subscription.activated", first);
+    expect(await billing(acme.id)).toMatchObject({ providerSubscriptionId: second, plan: "FREE" });
   });
 
   it.each(["MANAGER", "MEMBER"] as const)(
@@ -150,11 +165,8 @@ describe("checkout", () => {
       // Even with a forged role in the payload.
       expect(
         await startCheckoutAction("acme", { plan: "GROWTH", interval: "MONTH", role: "OWNER" }),
-      ).toMatchObject({
-        ok: false,
-        error: { code: "FORBIDDEN" },
-      });
-      expect(fakeStripe.customers).toEqual([]);
+      ).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+      expect(fakeRazorpay.created).toEqual([]);
       expect(await billing(acme.id)).toBeNull();
     },
   );
@@ -170,25 +182,42 @@ describe("checkout", () => {
       ok: false,
       error: { code: "UNAUTHENTICATED" },
     });
-    expect(fakeStripe.checkouts).toEqual([]);
+    expect(fakeRazorpay.created).toEqual([]);
   });
 
   it.each([
     [{ plan: "ENTERPRISE", interval: "MONTH" }],
     [{ plan: "FREE", interval: "MONTH" }],
     [{ plan: "GROWTH", interval: "DAY" }],
-    [{ priceId: "price_growthmonthly" }],
+    [{ planId: "plan_growthmonthly" }],
   ])("rejects forged plan input %j", async (input) => {
     actAs(members.OWNER.cookie);
     expect(await startCheckoutAction("acme", input)).toMatchObject({
       ok: false,
       error: { code: "VALIDATION_ERROR" },
     });
-    expect(fakeStripe.checkouts).toEqual([]);
+    expect(fakeRazorpay.created).toEqual([]);
+  });
+
+  it.each([
+    ["a different amount", { amount: 100 }],
+    ["the price without GST", { amount: 1_900 }],
+    ["another currency", { currency: "INR" }],
+    ["another period", { period: "weekly" }],
+  ])("never charges a Razorpay plan with %s than published", async (_label, change) => {
+    const id = PLAN_IDS.RAZORPAY_PLAN_GROWTH_MONTHLY;
+    fakeRazorpay.plans.set(id, { ...fakeRazorpay.plans.get(id)!, ...change });
+    actAs(members.OWNER.cookie);
+    expect(await startCheckoutAction("acme", { plan: "GROWTH", interval: "MONTH" })).toMatchObject({
+      ok: false,
+      error: { code: "SERVICE_UNAVAILABLE", message: "This plan is not available right now" },
+    });
+    expect(fakeRazorpay.created).toEqual([]);
   });
 
   it("refuses a second subscription while one is active", async () => {
     await subscribe();
+    actAs(members.OWNER.cookie);
     expect(await startCheckoutAction("acme", { plan: "AGENCY", interval: "MONTH" })).toMatchObject({
       ok: false,
       error: { code: "CONFLICT" },
@@ -208,50 +237,37 @@ describe("billing page access", () => {
     await expect(tenantPage("acme", "billing:read")).rejects.toThrow();
   });
 
-  it("the portal is for billing managers of the organization only", async () => {
-    await subscribe();
-    actAs(members.MEMBER.cookie);
-    expect(await openBillingPortalAction("acme", {})).toMatchObject({
-      ok: false,
-      error: { code: "FORBIDDEN" },
-    });
+  it("refreshing re-reads only the organization's own stored subscription", async () => {
+    const subscriptionId = await checkout();
+    fakeRazorpay.pay(subscriptionId); // paid, but no webhook delivered (e.g. local development)
+    actAs(members.OWNER.cookie);
+    await refreshBillingState(await getTenantContext("acme"));
+    expect(await billing(acme.id)).toMatchObject({ plan: "GROWTH", status: "ACTIVE" });
+    // Globex has nothing to refresh, and cannot pick up Acme's subscription.
     actAs(outsider.cookie);
-    expect(await openBillingPortalAction("acme", {})).toMatchObject({
-      ok: false,
-      error: { code: "NOT_FOUND" },
-    });
-    actAs(members.ADMIN.cookie);
-    expect(await openBillingPortalAction("acme", {})).toMatchObject({
-      ok: true,
-      data: { url: `https://billing.stripe.test/${fakeStripe.customers[0].id}` },
-    });
+    await refreshBillingState(await getTenantContext("globex"));
+    expect(await billing(globex.id)).toBeNull();
   });
 });
 
 describe("webhooks", () => {
-  it("activates the paid plan from a verified checkout.session.completed event", async () => {
-    const { subscription } = await subscribe("GROWTH", "MONTH");
+  it("activates the paid plan from a verified subscription.activated event", async () => {
+    const subscriptionId = await subscribe("GROWTH", "MONTH");
     expect(await billing(acme.id)).toMatchObject({
       plan: "GROWTH",
       interval: "MONTH",
       status: "ACTIVE",
-      stripeSubscriptionId: subscription.id,
+      providerSubscriptionId: subscriptionId,
       currentPeriodEnd: new Date(Date.UTC(2030, 0, 1)),
     });
-    const overview = await getBillingOverview(getTenantDb(acme.id));
-    expect(overview.entitlements).toEqual({
+    expect((await getBillingOverview(getTenantDb(acme.id))).entitlements).toEqual({
       plan: "GROWTH",
       limits: { clients: 50, projects: 50 },
     });
     const activated = await getDb().auditLog.findFirstOrThrow({
       where: { organizationId: acme.id, action: "billing.subscription_activated" },
     });
-    expect(activated).toMatchObject({ actorUserId: null, resourceId: subscription.id });
-    expect(activated.metadata).toMatchObject({
-      plan: "GROWTH",
-      interval: "MONTH",
-      status: "ACTIVE",
-    });
+    expect(activated).toMatchObject({ actorUserId: null, resourceId: subscriptionId });
 
     // The upgrade applies immediately: a 6th client is now allowed.
     await getDb().client.createMany({
@@ -268,104 +284,86 @@ describe("webhooks", () => {
 
   it.each([
     ["no signature", { signature: null }],
-    ["a signature made with another secret", { secret: "whsec_attacker" }],
-    ["a malformed signature", { signature: "t=1,v1=deadbeef" }],
+    ["a signature made with another secret", { secret: "attacker-secret-attacker" }],
+    ["a malformed signature", { signature: "not-hex" }],
+    ["no event id", { eventId: null }],
   ])("rejects %s with 400 and changes nothing", async (_label, options) => {
-    actAs(members.OWNER.cookie);
-    await startCheckoutAction("acme", { plan: "AGENCY", interval: "YEAR" });
-    const customerId = fakeStripe.customers[0].id;
-    const sessionId = [...fakeStripe.sessions.keys()][0];
-    const subscription = fakeStripe.completeCheckout(sessionId);
-    const result = await postWebhook(
-      "checkout.session.completed",
-      {
-        id: sessionId,
-        object: "checkout.session",
-        customer: customerId,
-        subscription: subscription.id,
-        client_reference_id: acme.id,
-      },
-      options,
-    );
+    const subscriptionId = await checkout("AGENCY", "YEAR");
+    fakeRazorpay.pay(subscriptionId);
+    const result = await postWebhook("subscription.activated", subscriptionId, options);
     expect(result).toEqual({
       status: 400,
       body: { error: { code: "BAD_REQUEST", message: "Invalid signature" } },
     });
-    expect(await billing(acme.id)).toMatchObject({ plan: "FREE", status: null });
-    expect(await getDb().stripeEvent.count()).toBe(0);
+    expect(await billing(acme.id)).toMatchObject({ plan: "FREE", status: "INCOMPLETE" });
+    expect(await getDb().billingEvent.count()).toBe(0);
+  });
+
+  it("rejects a tampered body even with a valid-looking signature", async () => {
+    const subscriptionId = await checkout();
+    const signed = webhookRequest("subscription.activated", subscriptionId);
+    const body = (await signed.text()).replace(subscriptionId, "sub_other");
+    const response = await webhook(
+      new Request(signed.url, { method: "POST", headers: signed.headers, body }),
+    );
+    expect(response.status).toBe(400);
   });
 
   it("applies a redelivered event only once", async () => {
-    const { subscription } = await subscribe();
-    fakeStripe.update(subscription.id, { priceId: PRICES.STRIPE_PRICE_AGENCY_MONTHLY });
-    const event = subscriptionEvent(subscription);
-    const first = await postWebhook("customer.subscription.updated", event, {
-      id: "evt_duplicate",
+    const subscriptionId = await subscribe();
+    fakeRazorpay.update(subscriptionId, { planId: PLAN_IDS.RAZORPAY_PLAN_AGENCY_MONTHLY });
+    const first = await postWebhook("subscription.updated", subscriptionId, {
+      eventId: "evt_duplicate",
     });
-    const second = await postWebhook("customer.subscription.updated", event, {
-      id: "evt_duplicate",
+    const second = await postWebhook("subscription.updated", subscriptionId, {
+      eventId: "evt_duplicate",
     });
     expect([first.status, second.status]).toEqual([200, 200]);
-    expect(await getDb().stripeEvent.count({ where: { id: "evt_duplicate" } })).toBe(1);
+    expect(await getDb().billingEvent.count({ where: { id: "evt_duplicate" } })).toBe(1);
     expect(
       (await auditActions(acme.id)).filter((action) => action === "billing.plan_changed"),
     ).toHaveLength(1);
     expect(await billing(acme.id)).toMatchObject({ plan: "AGENCY" });
   });
 
-  it("ignores events for customers ClientFlow did not create", async () => {
+  it("ignores events for subscriptions ClientFlow did not create", async () => {
     await subscribe();
     const before = await billing(acme.id);
-    const result = await postWebhook("customer.subscription.updated", {
-      id: "sub_unknown",
-      object: "subscription",
-      customer: "cus_unknown",
-    });
+    const result = await postWebhook("subscription.activated", "sub_unknown");
     expect(result.status).toBe(200);
     expect(await billing(acme.id)).toEqual(before);
   });
 
-  it("ignores a checkout whose organization reference does not match its customer (cross-organization)", async () => {
-    // Globex's billing admin starts checkout; the event claims it is for Acme.
-    actAs(outsider.cookie);
-    const started = await startCheckoutAction("globex", { plan: "AGENCY", interval: "MONTH" });
-    if (!started.ok) throw new Error(started.error.message);
-    const sessionId = started.data.url.split("/").pop()!;
-    const subscription = fakeStripe.completeCheckout(sessionId);
-    await postWebhook("checkout.session.completed", {
-      id: sessionId,
-      object: "checkout.session",
-      customer: subscription.customerId,
-      subscription: subscription.id,
-      client_reference_id: acme.id,
-    });
+  it("never applies one organization's subscription to another (cross-organization)", async () => {
+    const globexSubscription = await checkout("AGENCY", "MONTH", { slug: "globex", as: outsider });
+    // Razorpay reports the subscription as Acme's (tampered notes): refused everywhere.
+    fakeRazorpay.pay(globexSubscription);
+    fakeRazorpay.update(globexSubscription, { organizationId: acme.id });
+    await postWebhook("subscription.activated", globexSubscription);
     expect(await billing(acme.id)).toBeNull();
-    expect(await billing(globex.id)).toMatchObject({ plan: "FREE", status: null });
+    expect(await billing(globex.id)).toMatchObject({ plan: "FREE", status: "INCOMPLETE" });
 
-    // The subscription event (resolved through Globex's own customer) applies to Globex only.
-    await postWebhook("customer.subscription.created", subscriptionEvent(subscription));
+    fakeRazorpay.update(globexSubscription, { organizationId: globex.id });
+    await postWebhook("subscription.activated", globexSubscription);
     expect(await billing(globex.id)).toMatchObject({ plan: "AGENCY", status: "ACTIVE" });
     expect(await billing(acme.id)).toBeNull();
   });
 
-  it("grants nothing for a subscription on an unknown (forged) Price", async () => {
-    actAs(members.OWNER.cookie);
-    const started = await startCheckoutAction("acme", { plan: "STARTER", interval: "MONTH" });
-    if (!started.ok) throw new Error(started.error.message);
-    const subscription = fakeStripe.completeCheckout(started.data.url.split("/").pop()!, {
-      priceId: "price_forged",
-    });
-    await postWebhook("customer.subscription.created", subscriptionEvent(subscription));
+  it("grants nothing for a subscription on an unknown (forged) Razorpay plan", async () => {
+    const subscriptionId = await checkout("STARTER", "MONTH");
+    fakeRazorpay.pay(subscriptionId);
+    fakeRazorpay.update(subscriptionId, { planId: "plan_forged" });
+    await postWebhook("subscription.activated", subscriptionId);
     expect(await billing(acme.id)).toMatchObject({ plan: "FREE", status: "ACTIVE" });
-    expect((await getBillingOverview(getTenantDb(acme.id))).entitlements.plan).toBe("FREE");
+    expect(await effectivePlan(acme.id)).toBe("FREE");
   });
 
-  it("reads the current state from Stripe, so a late event cannot roll back a cancellation", async () => {
-    const { subscription } = await subscribe();
-    fakeStripe.update(subscription.id, { status: "CANCELED" });
-    await postWebhook("customer.subscription.deleted", subscriptionEvent(subscription));
-    // A delayed "updated" event from before the cancellation arrives last.
-    await postWebhook("customer.subscription.updated", subscriptionEvent(subscription));
+  it("reads the current state from Razorpay, so a late event cannot roll back a cancellation", async () => {
+    const subscriptionId = await subscribe();
+    fakeRazorpay.update(subscriptionId, { status: "CANCELED" });
+    await postWebhook("subscription.cancelled", subscriptionId);
+    // A delayed "charged" event from before the cancellation arrives last.
+    await postWebhook("subscription.charged", subscriptionId);
     expect(await billing(acme.id)).toMatchObject({ plan: "FREE", status: "CANCELED" });
   });
 
@@ -373,30 +371,24 @@ describe("webhooks", () => {
     clearBillingEnv();
     vi.resetModules();
     const { POST } = await import("@/app/api/billing/webhook/route");
-    const response = await POST(
-      webhookRequest("customer.subscription.updated", { object: "subscription" }),
-    );
+    const response = await POST(webhookRequest("subscription.activated", "sub_x"));
     expect(response.status).toBe(503);
     vi.unstubAllEnvs();
   });
 });
 
 describe("plan changes", () => {
-  it("upgrades an active subscription (applied from Stripe's state) and audits who asked", async () => {
-    const { subscription } = await subscribe("STARTER", "MONTH");
+  it("upgrades apply now (from Razorpay's state) and are audited with who asked", async () => {
+    const subscriptionId = await subscribe("STARTER", "MONTH");
     actAs(members.ADMIN.cookie);
-    expect(await changePlanAction("acme", { plan: "AGENCY", interval: "YEAR" })).toEqual({
+    expect(await changePlanAction("acme", { plan: "AGENCY", interval: "MONTH" })).toEqual({
       ok: true,
-      data: null,
+      data: { when: "now" },
     });
-    expect(fakeStripe.subscriptions.get(subscription.id)?.priceId).toBe(
-      PRICES.STRIPE_PRICE_AGENCY_ANNUAL,
-    );
-    expect(await billing(acme.id)).toMatchObject({
-      plan: "AGENCY",
-      interval: "YEAR",
-      status: "ACTIVE",
-    });
+    expect(fakeRazorpay.planChanges).toEqual([
+      { subscriptionId, planId: PLAN_IDS.RAZORPAY_PLAN_AGENCY_MONTHLY, when: "now" },
+    ]);
+    expect(await billing(acme.id)).toMatchObject({ plan: "AGENCY", status: "ACTIVE" });
     const requested = await getDb().auditLog.findFirstOrThrow({
       where: { organizationId: acme.id, action: "billing.plan_change_requested" },
     });
@@ -409,8 +401,8 @@ describe("plan changes", () => {
     ]);
   });
 
-  it("downgrades keep all records and only limit new ones", async () => {
-    await subscribe("GROWTH", "MONTH");
+  it("downgrades are scheduled for the end of the period, keep all records and only limit new ones", async () => {
+    const subscriptionId = await subscribe("GROWTH", "MONTH");
     await getDb().client.createMany({
       data: Array.from({ length: 20 }, (_, index) => ({
         organizationId: acme.id,
@@ -418,12 +410,32 @@ describe("plan changes", () => {
       })),
     });
     actAs(members.OWNER.cookie);
-    expect(await changePlanAction("acme", { plan: "STARTER", interval: "MONTH" })).toMatchObject({
+    expect(await changePlanAction("acme", { plan: "STARTER", interval: "MONTH" })).toEqual({
       ok: true,
+      data: { when: "cycle_end" },
     });
+    // Still Growth until the period ends; the change is shown as scheduled.
+    expect(await billing(acme.id)).toMatchObject({ plan: "GROWTH", hasScheduledChange: true });
+    expect(
+      await changePlanAction("acme", { plan: "PROFESSIONAL", interval: "MONTH" }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "CONFLICT" },
+    });
+
+    // The period ends: Razorpay switches the plan.
+    fakeRazorpay.update(subscriptionId, {
+      planId: PLAN_IDS.RAZORPAY_PLAN_STARTER_MONTHLY,
+      hasScheduledChange: false,
+    });
+    await postWebhook("subscription.updated", subscriptionId);
+    expect(await billing(acme.id)).toMatchObject({ plan: "STARTER", hasScheduledChange: false });
     expect(await getDb().client.count({ where: { organizationId: acme.id } })).toBe(20);
-    const overview = await getBillingOverview(getTenantDb(acme.id));
-    expect(overview.usage.clients).toMatchObject({ used: 20, limit: 15, overBy: 5 });
+    expect((await getBillingOverview(getTenantDb(acme.id))).usage.clients).toMatchObject({
+      used: 20,
+      limit: 15,
+      overBy: 5,
+    });
     actAs(members.MANAGER.cookie);
     expect(await createClientAction("acme", { name: "Over" })).toMatchObject({
       ok: false,
@@ -445,133 +457,82 @@ describe("plan changes", () => {
     });
   });
 
-  it.each(["MANAGER", "MEMBER"] as const)(
-    "%s cannot change, cancel or resume the plan",
-    async (role) => {
-      await subscribe();
-      actAs(members[role].cookie);
-      for (const result of [
-        await changePlanAction("acme", { plan: "AGENCY", interval: "MONTH" }),
-        await cancelSubscriptionAction("acme", {}),
-        await resumeSubscriptionAction("acme", {}),
-      ]) {
-        expect(result).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
-      }
-      expect(await billing(acme.id)).toMatchObject({ plan: "GROWTH", cancelAtPeriodEnd: false });
-    },
-  );
+  it.each(["MANAGER", "MEMBER"] as const)("%s cannot change or cancel the plan", async (role) => {
+    await subscribe();
+    actAs(members[role].cookie);
+    for (const result of [
+      await changePlanAction("acme", { plan: "AGENCY", interval: "MONTH" }),
+      await cancelSubscriptionAction("acme", {}),
+    ]) {
+      expect(result).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+    }
+    expect(fakeRazorpay.planChanges).toEqual([]);
+    expect(fakeRazorpay.cancellations).toEqual([]);
+    expect(await billing(acme.id)).toMatchObject({ plan: "GROWTH", cancelAtPeriodEnd: false });
+  });
 });
 
 describe("cancellation and payment failures", () => {
-  it("cancels at period end (keeping the plan until then), can be withdrawn, then ends on Stripe's word", async () => {
-    const { subscription } = await subscribe();
+  it("cancels at period end (keeping the plan until then), then ends on Razorpay's word", async () => {
+    const subscriptionId = await subscribe();
     actAs(members.OWNER.cookie);
     expect(await cancelSubscriptionAction("acme", {})).toEqual({ ok: true, data: null });
+    expect(fakeRazorpay.cancellations).toEqual([{ subscriptionId, atCycleEnd: true }]);
     expect(await billing(acme.id)).toMatchObject({
       plan: "GROWTH",
       status: "ACTIVE",
       cancelAtPeriodEnd: true,
     });
+    // Renewal-time events before the end do not forget the cancellation.
+    await postWebhook("subscription.charged", subscriptionId);
+    expect(await billing(acme.id)).toMatchObject({ cancelAtPeriodEnd: true });
+    // No further plan changes or a second cancellation meanwhile.
+    expect(await cancelSubscriptionAction("acme", {})).toMatchObject({
+      ok: false,
+      error: { code: "CONFLICT" },
+    });
 
-    expect(await resumeSubscriptionAction("acme", {})).toEqual({ ok: true, data: null });
-    expect(await billing(acme.id)).toMatchObject({ cancelAtPeriodEnd: false });
-
-    await cancelSubscriptionAction("acme", {});
-    fakeStripe.update(subscription.id, { status: "CANCELED" });
-    await postWebhook("customer.subscription.deleted", subscriptionEvent(subscription));
+    fakeRazorpay.update(subscriptionId, { status: "CANCELED" });
+    await postWebhook("subscription.cancelled", subscriptionId);
     expect(await billing(acme.id)).toMatchObject({
       plan: "FREE",
       status: "CANCELED",
       cancelAtPeriodEnd: false,
     });
     expect(await auditActions(acme.id)).toEqual(
-      expect.arrayContaining([
-        "billing.cancellation_requested",
-        "billing.cancellation_withdrawn",
-        "billing.subscription_cancelled",
-      ]),
+      expect.arrayContaining(["billing.cancellation_requested", "billing.subscription_cancelled"]),
     );
     // Cancelled: a new checkout is possible again.
-    actAs(members.OWNER.cookie);
-    expect(await startCheckoutAction("acme", { plan: "STARTER", interval: "MONTH" })).toMatchObject(
-      { ok: true },
-    );
+    expect(await checkout("STARTER", "MONTH")).toMatch(/^sub_/);
   });
 
-  it("keeps the plan while a failed payment is retried, then falls back to Free when unpaid", async () => {
-    const { subscription } = await subscribe("PROFESSIONAL", "MONTH");
-    fakeStripe.update(subscription.id, { status: "PAST_DUE" });
-    await postWebhook("invoice.payment_failed", {
-      id: "in_1",
-      object: "invoice",
-      customer: subscription.customerId,
-    });
+  it("keeps the plan while a failed payment is retried, then falls back to Free when halted", async () => {
+    const subscriptionId = await subscribe("PROFESSIONAL", "MONTH");
+    fakeRazorpay.update(subscriptionId, { status: "PAST_DUE" });
+    await postWebhook("subscription.pending", subscriptionId);
     expect(await billing(acme.id)).toMatchObject({ plan: "PROFESSIONAL", status: "PAST_DUE" });
-    expect((await getBillingOverview(getTenantDb(acme.id))).entitlements.plan).toBe("PROFESSIONAL");
+    expect(await effectivePlan(acme.id)).toBe("PROFESSIONAL");
     const failed = await getDb().auditLog.findFirstOrThrow({
       where: { organizationId: acme.id, action: "billing.payment_failed" },
     });
     expect(failed.actorUserId).toBeNull();
 
-    fakeStripe.update(subscription.id, { status: "UNPAID" });
-    await postWebhook("customer.subscription.updated", subscriptionEvent(subscription));
-    expect((await getBillingOverview(getTenantDb(acme.id))).entitlements.plan).toBe("FREE");
+    fakeRazorpay.update(subscriptionId, { status: "UNPAID" });
+    await postWebhook("subscription.halted", subscriptionId);
+    expect(await effectivePlan(acme.id)).toBe("FREE");
     expect(await auditActions(acme.id)).toContain("billing.subscription_status_changed");
 
     // Paid again: the plan comes back.
-    fakeStripe.update(subscription.id, { status: "ACTIVE" });
-    await postWebhook("invoice.paid", {
-      id: "in_2",
-      object: "invoice",
-      customer: subscription.customerId,
-    });
-    expect((await getBillingOverview(getTenantDb(acme.id))).entitlements.plan).toBe("PROFESSIONAL");
+    fakeRazorpay.update(subscriptionId, { status: "ACTIVE" });
+    await postWebhook("subscription.charged", subscriptionId);
+    expect(await effectivePlan(acme.id)).toBe("PROFESSIONAL");
   });
 
-  it("a first payment that fails grants nothing", async () => {
-    actAs(members.OWNER.cookie);
-    const started = await startCheckoutAction("acme", { plan: "AGENCY", interval: "MONTH" });
-    if (!started.ok) throw new Error(started.error.message);
-    const subscription = fakeStripe.completeCheckout(started.data.url.split("/").pop()!, {
-      status: "INCOMPLETE",
-    });
-    await postWebhook("customer.subscription.created", subscriptionEvent(subscription));
+  it("an unpaid checkout grants nothing", async () => {
+    const subscriptionId = await checkout("AGENCY", "MONTH");
+    await postWebhook("subscription.authenticated", subscriptionId);
+    // The plan being paid for is recorded, but grants nothing until Razorpay reports it active.
     expect(await billing(acme.id)).toMatchObject({ plan: "AGENCY", status: "INCOMPLETE" });
-    expect((await getBillingOverview(getTenantDb(acme.id))).entitlements.plan).toBe("FREE");
-  });
-});
-
-describe("checkout return page (success URL)", () => {
-  it("applies this organization's own completed session", async () => {
-    actAs(members.OWNER.cookie);
-    const started = await startCheckoutAction("acme", { plan: "GROWTH", interval: "MONTH" });
-    if (!started.ok) throw new Error(started.error.message);
-    const sessionId = started.data.url.split("/").pop()!;
-    fakeStripe.completeCheckout(sessionId);
-    expect(await syncCheckoutSession(acme.id, sessionId, fakeStripe.provider)).toBe(true);
-    expect(await billing(acme.id)).toMatchObject({ plan: "GROWTH", status: "ACTIVE" });
-  });
-
-  it("does nothing for a forged, unpaid or other organization's session", async () => {
-    actAs(members.OWNER.cookie);
-    const acmeStarted = await startCheckoutAction("acme", { plan: "STARTER", interval: "MONTH" });
-    if (!acmeStarted.ok) throw new Error(acmeStarted.error.message);
-    const unpaid = acmeStarted.data.url.split("/").pop()!;
-    actAs(outsider.cookie);
-    const globexStarted = await startCheckoutAction("globex", {
-      plan: "AGENCY",
-      interval: "MONTH",
-    });
-    if (!globexStarted.ok) throw new Error(globexStarted.error.message);
-    const globexSession = globexStarted.data.url.split("/").pop()!;
-    fakeStripe.completeCheckout(globexSession);
-
-    expect(await syncCheckoutSession(acme.id, "cs_test_forged000000000", fakeStripe.provider)).toBe(
-      false,
-    );
-    expect(await syncCheckoutSession(acme.id, unpaid, fakeStripe.provider)).toBe(false);
-    expect(await syncCheckoutSession(acme.id, globexSession, fakeStripe.provider)).toBe(false);
-    expect(await billing(acme.id)).toMatchObject({ plan: "FREE", status: null });
-    expect(await billing(globex.id)).toMatchObject({ plan: "FREE", status: null });
+    expect(await effectivePlan(acme.id)).toBe("FREE");
   });
 });

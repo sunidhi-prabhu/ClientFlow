@@ -9,7 +9,7 @@ const valid = {
   SMTP_URL: "smtps://user:pass@smtp.example.com:465",
   EMAIL_FROM: "ClientFlow <no-reply@clientflow.example>",
   // Billing not configured (paid plans unavailable).
-  STRIPE_SECRET_KEY: "",
+  RAZORPAY_KEY_ID: "",
 };
 
 async function load() {
@@ -39,7 +39,11 @@ describe("validateConfigurationAtStartup", () => {
     ["client IP configuration", { AUTH_TRUSTED_PROXIES: "" }, /AUTH_TRUSTED_PROXIES/],
     ["email settings", { SMTP_URL: "" }, /SMTP_URL/],
     ["TLS to the database", { DATABASE_URL: "postgresql://a:b@db.internal:5432/x" }, /TLS/],
-    ["complete Stripe settings", { STRIPE_SECRET_KEY: "sk_live_abc123" }, /STRIPE_WEBHOOK_SECRET/],
+    [
+      "complete Razorpay settings",
+      { RAZORPAY_KEY_ID: "rzp_live_abc123" },
+      /RAZORPAY_WEBHOOK_SECRET/,
+    ],
   ])("refuses to start without valid %s", async (_label, override, message) => {
     for (const [key, value] of Object.entries({ ...valid, ...override })) vi.stubEnv(key, value);
     const { validateConfigurationAtStartup } = await load();
