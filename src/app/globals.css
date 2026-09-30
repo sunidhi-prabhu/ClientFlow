@@ -130,3 +130,13 @@
     @apply font-sans;
   }
 }
+
+/* Step timer in the sign-in walkthrough (src/components/auth/auth-showcase.tsx). */
+@keyframes showcase-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
